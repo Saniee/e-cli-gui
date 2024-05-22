@@ -1,4 +1,7 @@
+#![allow(dead_code)]
+
 use std::path::Path;
+use std::sync::mpsc::Sender;
 
 use reqwest::Client;
 use reqwest::{header::HeaderMap, header::HeaderValue, header::USER_AGENT};
@@ -6,13 +9,16 @@ use reqwest::{header::HeaderMap, header::HeaderValue, header::USER_AGENT};
 use crate::funcs::{self, create_dl_dir, parse_artists};
 use crate::type_defs::api_defs::Posts;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn download_favourites(
-    username: &String,
-    count: &i32,
-    random: &bool,
-    tags: &String,
-    lower_quality: &bool,
-    api_source: &String,
+    username: String,
+    count: i32,
+    random: bool,
+    tags: String,
+    lower_quality: bool,
+    api_source: String,
+    tx: Sender<u64>,
+    ctx: egui::Context,
 ) -> Option<f64> {
     // println!("{}", args.random);
     println!(
@@ -28,9 +34,9 @@ pub async fn download_favourites(
     );
     let client = client.default_headers(headers).build().unwrap();
 
-    let random_check: &str = if *random { "order:random" } else { "" };
+    let random_check: &str = if random { "order:random" } else { "" };
 
-    let tags: &str = if !tags.is_empty() { tags } else { "" };
+    let tags: &str = if !tags.is_empty() { &tags } else { "" };
 
     let target: String = format!(
         "https://{}/posts.json?tags=fav:{} {} {}&limit={}",
@@ -46,7 +52,7 @@ pub async fn download_favourites(
         .await
         .expect("Err");
 
-    if data.posts.len() == 0 {
+    if data.posts.is_empty() {
         println!("No post found...");
         return None;
     }
@@ -70,7 +76,7 @@ pub async fn download_favourites(
 
         if !path.exists() {
             let file_size: f64;
-            if *lower_quality {
+            if lower_quality {
                 file_size = funcs::lower_quality_dl(&post, &artist_name).await
             } else {
                 match &post.file.url {
@@ -95,6 +101,9 @@ pub async fn download_favourites(
                 post.file.ext,
                 file_size / 1024.0 / 1024.0
             );
+
+            let _ = tx.send(1);
+            ctx.request_repaint();
 
             dl_size += file_size
         } else {

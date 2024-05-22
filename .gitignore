@@ -1,2 +1,4 @@
 /target
+/dl
 Cargo.lock
+.vscode
