@@ -97,3 +97,10 @@ pub async fn create_dl_dir() -> bool {
         false
     }
 }
+
+pub fn open_dl_dir() {
+    std::process::Command::new("explorer")
+        .arg(r".\dl")
+        .spawn()
+        .unwrap();
+}

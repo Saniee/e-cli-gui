@@ -11,6 +11,7 @@ use commands::download_favourites;
 use eframe::egui;
 use egui::Align2;
 use egui_toast::{Toast, ToastOptions, Toasts};
+use funcs::open_dl_dir;
 use tokio::runtime::Runtime;
 
 mod commands;
@@ -25,7 +26,7 @@ fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(false)
-            .with_inner_size([300.0, 400.0]),
+            .with_inner_size([300.0, 500.0]),
         ..Default::default()
     };
 
@@ -45,6 +46,7 @@ struct App {
     lower_quality: bool,
     api_source: String,
     dl_count: u64,
+    open_folder: bool,
 }
 
 impl Default for App {
@@ -61,6 +63,7 @@ impl Default for App {
             lower_quality: false,
             api_source: "e926.net".to_string(),
             dl_count: 0,
+            open_folder: true,
         }
     }
 }
@@ -79,17 +82,6 @@ impl eframe::App for App {
             .direction(egui::Direction::BottomUp);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.dl_count > 0 {
-                ui.vertical_centered(|ui| {
-                    ui.label(format!(
-                        "Downloading... ({}/{})",
-                        self.dl_count, self.post_amount
-                    ));
-
-                    ui.spinner();
-                });
-            }
-
             ui.vertical_centered(|ui| {
                 let api_source_label = ui.label("Api Source");
                 ui.text_edit_singleline(&mut self.api_source)
@@ -105,6 +97,10 @@ impl eframe::App for App {
 
                 ui.checkbox(&mut self.random, "Get Random Posts?");
                 ui.checkbox(&mut self.lower_quality, "Get lower quality of posts?");
+                ui.checkbox(
+                    &mut self.open_folder,
+                    "Open /dl/ folder at download finish?",
+                )
             });
             ui.add_space(5.0);
             let slider = ui.add(
@@ -118,10 +114,7 @@ impl eframe::App for App {
             ui.vertical_centered(|ui| {
                 let open_dl_btn = ui.button("Open /dl/");
                 if open_dl_btn.clicked() && Path::new("./dl").exists() {
-                    std::process::Command::new("explorer")
-                        .arg(r".\dl")
-                        .spawn()
-                        .unwrap();
+                    open_dl_dir()
                 } else if open_dl_btn.clicked() {
                     toasts.add(Toast {
                         text: "No Folder found!".into(),
@@ -166,12 +159,25 @@ impl eframe::App for App {
                         self.tags.clone(),
                         self.lower_quality,
                         self.api_source.clone(),
+                        self.open_folder,
                         self.tx.clone(),
                         ctx.clone(),
                     )
                 }
                 ui.add_space(5.0);
                 ui.add_enabled(false, egui::Button::new("Download Posts with Tags"));
+
+                ui.add_space(10.0);
+                if self.dl_count > 0 {
+                    ui.spinner();
+
+                    ui.label(format!(
+                        "Downloading... ({}/{})",
+                        self.dl_count, self.post_amount
+                    ));
+
+                    ui.add_space(10.0);
+                }
             });
             toasts.show(ctx);
         });
@@ -186,6 +192,7 @@ fn dl_favs(
     tags: String,
     lower_quality: bool,
     api_source: String,
+    open_dl_folder: bool,
     tx: Sender<u64>,
     ctx: egui::Context,
 ) {
@@ -203,5 +210,9 @@ fn dl_favs(
         .await;
 
         let _ = tx.send(0);
+
+        if open_dl_folder {
+            open_dl_dir()
+        }
     });
 }
