@@ -1,6 +1,6 @@
 [package]
 name = "e-cli-gui"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -10,3 +10,4 @@ egui-toast = "0.13.0"
 reqwest = { version = "0.12.4", features = ["json"] }
 serde = { version = "1.0.202", features = ["derive"] }
 tokio = { version = "1.37.0", features = ["full"] }
+trash = "4.1.1"

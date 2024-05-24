@@ -2,25 +2,18 @@
 
 use e_handler::EHandler;
 use eframe::egui;
-use egui::Align2;
+use egui::{Align2, Color32};
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
-use std::{
-    fs,
-    path::Path,
-    sync::mpsc::{Receiver, Sender},
-};
-use tokio::runtime::Runtime;
+use std::{path::Path, sync::mpsc::Sender};
 use util_lib::open_dl_dir;
 
+mod channel_handler;
 mod e_handler;
 mod type_defs;
 mod util_lib;
 
-fn main() {
-    let rt = Runtime::new().expect("Unable to create Runtime.");
-
-    let _enter = rt.enter();
-
+#[tokio::main]
+async fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(false)
@@ -33,44 +26,39 @@ fn main() {
 
 struct App {
     data: e_handler::EHandler,
-    rx: Receiver<u64>,
+    channels: channel_handler::GuiChannels,
     dl_count: u64,
     open_folder: bool,
     downloading_status: bool,
-    dl_status_rx: Receiver<bool>,
-    dl_status_tx: Sender<bool>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (dl_status_tx, dl_status_rx) = std::sync::mpsc::channel();
+        let channels = channel_handler::GuiChannels::default();
 
         let mut data = e_handler::EHandler::default();
-        data.define_sender(tx);
+        data.define_sender(channels.dl_count_channel.0.clone());
 
         Self {
             data,
-            rx,
+            channels,
             dl_count: 0,
-            open_folder: true,
+            open_folder: false,
             downloading_status: false,
-            dl_status_rx,
-            dl_status_tx,
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Ok(value) = self.rx.try_recv() {
-            if value < 1 {
-                self.dl_count = value;
+        if let Ok(dl_count) = self.channels.dl_count_channel.1.try_recv() {
+            if dl_count < 1 {
+                self.dl_count = dl_count;
             }
-            self.dl_count += value;
+            self.dl_count += dl_count;
         }
 
-        if let Ok(value) = self.dl_status_rx.try_recv() {
+        if let Ok(value) = self.channels.dl_status_channel.1.try_recv() {
             self.downloading_status = value
         }
 
@@ -79,6 +67,19 @@ impl eframe::App for App {
         let mut toasts = Toasts::new()
             .anchor(Align2::CENTER_BOTTOM, (0.0, -8.0))
             .direction(egui::Direction::BottomUp);
+
+        if let Ok(finished) = self.channels.finished_status_channel.1.try_recv() {
+            if finished {
+                toasts.add(Toast {
+                    kind: ToastKind::Info,
+                    text: "Finished Downloading!".into(),
+                    options: ToastOptions::default()
+                        .duration_in_seconds(1.5)
+                        .show_progress(true),
+                });
+                let _ = self.channels.finished_status_channel.0.send(false);
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -111,7 +112,7 @@ impl eframe::App for App {
 
             ui.add_space(15.0);
             ui.vertical_centered(|ui| {
-                let open_dl_btn = ui.button("Open /dl/");
+                let open_dl_btn = ui.button("Open the ./dl Folder with Explorer");
                 if open_dl_btn.clicked() && Path::new("./dl").exists() {
                     open_dl_dir()
                 } else if open_dl_btn.clicked() {
@@ -119,18 +120,22 @@ impl eframe::App for App {
                         text: "No Folder found!".into(),
                         kind: ToastKind::Error,
                         options: ToastOptions::default()
-                            .duration_in_seconds(5.0)
+                            .duration_in_seconds(1.5)
                             .show_progress(true),
                     });
                 }
-                let clear_dl_btn = ui.button("Clear /dl/ folder");
+                let clear_dl_btn_style = egui::Button::new("Put the ./dl Folder into Trash")
+                    .fill(Color32::from_rgb(125, 0, 0));
+                let clear_dl_btn = ui.add(clear_dl_btn_style);
+
                 if clear_dl_btn.clicked() && Path::new("./dl").exists() {
-                    fs::remove_dir_all("./dl").expect("Couldn't Remove directory.");
+                    let _ = trash::delete("./dl/");
+
                     toasts.add(Toast {
-                        text: "Cleared /dl/".into(),
+                        text: "Trashed ./dl !".into(),
                         kind: ToastKind::Info,
                         options: ToastOptions::default()
-                            .duration_in_seconds(5.0)
+                            .duration_in_seconds(1.5)
                             .show_progress(true),
                     });
                 } else if clear_dl_btn.clicked() {
@@ -138,24 +143,27 @@ impl eframe::App for App {
                         text: "No Folder found!".into(),
                         kind: ToastKind::Error,
                         options: ToastOptions::default()
-                            .duration_in_seconds(5.0)
+                            .duration_in_seconds(1.5)
                             .show_progress(true),
                     });
                 };
-                ui.add_space(5.0);
+                ui.add_space(20.0);
+                ui.label("Main Functions:");
                 if ui.button("Download Favourites").clicked() {
                     toasts.add(Toast {
                         kind: ToastKind::Info,
                         text: "Starting Download...".into(),
                         options: ToastOptions::default()
-                            .duration_in_seconds(5.0)
+                            .duration_in_seconds(1.5)
                             .show_progress(true),
                     });
+
                     dl_favs_btn(
                         self.data.clone(),
-                        self.data.clone().tx.unwrap().clone(),
                         self.open_folder,
-                        self.dl_status_tx.clone(),
+                        self.channels.dl_count_channel.0.clone(),
+                        self.channels.dl_status_channel.0.clone(),
+                        self.channels.finished_status_channel.0.clone(),
                     )
                 }
                 ui.add_space(5.0);
@@ -164,14 +172,16 @@ impl eframe::App for App {
                         kind: ToastKind::Info,
                         text: "Starting Download...".into(),
                         options: ToastOptions::default()
-                            .duration_in_seconds(5.0)
+                            .duration_in_seconds(1.5)
                             .show_progress(true),
                     });
+
                     dl_tags_btn(
                         self.data.clone(),
-                        self.data.clone().tx.unwrap().clone(),
                         self.open_folder,
-                        self.dl_status_tx.clone(),
+                        self.channels.dl_count_channel.0.clone(),
+                        self.channels.dl_status_channel.0.clone(),
+                        self.channels.finished_status_channel.0.clone(),
                     )
                 }
 
@@ -188,17 +198,25 @@ impl eframe::App for App {
                 }
             });
             toasts.show(ctx);
+            ctx.request_repaint();
         });
     }
 }
 
-fn dl_favs_btn(data: EHandler, tx: Sender<u64>, open_dl_folder: bool, dl_status_tx: Sender<bool>) {
+fn dl_favs_btn(
+    data: EHandler,
+    open_dl_folder: bool,
+    dl_count_tx: Sender<u64>,
+    dl_status_tx: Sender<bool>,
+    finished_status_tx: Sender<bool>,
+) {
     tokio::spawn(async move {
         let _ = dl_status_tx.send(true);
         data.download_favourites().await;
 
-        let _ = tx.send(0);
+        let _ = dl_count_tx.send(0);
         let _ = dl_status_tx.send(false);
+        let _ = finished_status_tx.send(true);
 
         if open_dl_folder {
             open_dl_dir();
@@ -206,14 +224,21 @@ fn dl_favs_btn(data: EHandler, tx: Sender<u64>, open_dl_folder: bool, dl_status_
     });
 }
 
-fn dl_tags_btn(data: EHandler, tx: Sender<u64>, open_dl_folder: bool, dl_status_tx: Sender<bool>) {
+fn dl_tags_btn(
+    data: EHandler,
+    open_dl_folder: bool,
+    dl_count_tx: Sender<u64>,
+    dl_status_tx: Sender<bool>,
+    finished_status_tx: Sender<bool>,
+) {
     tokio::spawn(async move {
         let _ = dl_status_tx.send(true);
 
         data.download_with_tags().await;
 
-        let _ = tx.send(0);
+        let _ = dl_count_tx.send(0);
         let _ = dl_status_tx.send(false);
+        let _ = finished_status_tx.send(true);
 
         if open_dl_folder {
             open_dl_dir();

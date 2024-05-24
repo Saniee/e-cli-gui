@@ -20,7 +20,7 @@ pub struct EHandler {
     pub tags: String,
     pub lower_quality: bool,
     pub api_source: String,
-    pub tx: Option<Sender<u64>>,
+    pub dl_count_tx: Option<Sender<u64>>,
     ctx: Option<egui::Context>,
     client: Client,
 }
@@ -42,7 +42,7 @@ impl Default for EHandler {
             tags: String::new(),
             lower_quality: false,
             api_source: "e926.net".to_string(),
-            tx: None,
+            dl_count_tx: None,
             ctx: None,
             client: new_client,
         }
@@ -54,8 +54,8 @@ impl EHandler {
         self.ctx = Some(ctx);
     }
 
-    pub fn define_sender(&mut self, tx: Sender<u64>) {
-        self.tx = Some(tx)
+    pub fn define_sender(&mut self, dl_count_tx: Sender<u64>) {
+        self.dl_count_tx = Some(dl_count_tx)
     }
 
     fn parse_artists(&self, tags: &Tags) -> String {
@@ -112,7 +112,7 @@ impl EHandler {
                     file_size / 1024.0 / 1024.0
                 );
 
-                let _ = self.tx.as_ref().unwrap().send(1);
+                let _ = self.dl_count_tx.as_ref().unwrap().send(1);
                 self.ctx.as_ref().unwrap().request_repaint();
             } else {
                 println!(
