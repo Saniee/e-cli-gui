@@ -1,10 +1,8 @@
-#![allow(dead_code)]
-
-use std::{cmp::Ordering, path::Path};
+use std::path::Path;
 
 use tokio::{fs::create_dir_all, fs::File, io::AsyncWriteExt};
 
-use crate::type_defs::api_defs::{Post, Tags};
+use crate::type_defs::api_defs::Post;
 
 /// This function downloads the file with reqwest and returns the size of it in bytes.
 pub async fn download(
@@ -70,20 +68,6 @@ pub async fn lower_quality_dl(post: &Post, artist_name: &String) -> f64 {
             artist_name, &post.id
         );
         0.0
-    }
-}
-
-pub fn parse_artists(tags: &Tags) -> String {
-    match tags.artist.len().cmp(&1) {
-        Ordering::Greater => {
-            let mut artists: String = String::new();
-            for artist in tags.artist.iter() {
-                artists = artists + artist + ", "
-            }
-            artists[..artists.len() - 2].to_string()
-        }
-        Ordering::Equal => tags.artist[0].to_string(),
-        Ordering::Less => "unknown-artist".to_string(),
     }
 }
 

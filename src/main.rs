@@ -1,22 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(rustdoc::missing_crate_level_docs)]
 
+use e_handler::EHandler;
+use eframe::egui;
+use egui::Align2;
+use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use std::{
     fs,
     path::Path,
     sync::mpsc::{Receiver, Sender},
 };
-
-use commands::download_favourites;
-use eframe::egui;
-use egui::Align2;
-use egui_toast::{Toast, ToastOptions, Toasts};
-use funcs::open_dl_dir;
 use tokio::runtime::Runtime;
+use util_lib::open_dl_dir;
 
-mod commands;
-mod funcs;
+mod e_handler;
 mod type_defs;
+mod util_lib;
 
 fn main() {
     let rt = Runtime::new().expect("Unable to create Runtime.");
@@ -34,36 +33,31 @@ fn main() {
 }
 
 struct App {
-    // Sender/Reciver for async stuff.
-    tx: Sender<u64>,
+    data: e_handler::EHandler,
     rx: Receiver<u64>,
-
-    // Other vars
-    tags: String,
-    username: String,
-    post_amount: i32,
-    random: bool,
-    lower_quality: bool,
-    api_source: String,
     dl_count: u64,
     open_folder: bool,
+    downloading_status: bool,
+    dl_status_rx: Receiver<bool>,
+    dl_status_tx: Sender<bool>,
 }
 
 impl Default for App {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (dl_status_tx, dl_status_rx) = std::sync::mpsc::channel();
+
+        let mut data = e_handler::EHandler::default();
+        data.define_sender(tx);
 
         Self {
-            tx,
+            data,
             rx,
-            tags: String::new(),
-            username: String::new(),
-            post_amount: 5,
-            random: false,
-            lower_quality: false,
-            api_source: "e926.net".to_string(),
             dl_count: 0,
             open_folder: true,
+            downloading_status: false,
+            dl_status_rx,
+            dl_status_tx,
         }
     }
 }
@@ -77,6 +71,12 @@ impl eframe::App for App {
             self.dl_count += value;
         }
 
+        if let Ok(value) = self.dl_status_rx.try_recv() {
+            self.downloading_status = value
+        }
+
+        self.data.define_gui(ctx.clone());
+
         let mut toasts = Toasts::new()
             .anchor(Align2::CENTER_BOTTOM, (0.0, -8.0))
             .direction(egui::Direction::BottomUp);
@@ -84,19 +84,19 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 let api_source_label = ui.label("Api Source");
-                ui.text_edit_singleline(&mut self.api_source)
+                ui.text_edit_singleline(&mut self.data.api_source)
                     .labelled_by(api_source_label.id);
 
                 let username_label = ui.label("Username");
-                ui.text_edit_singleline(&mut self.username)
+                ui.text_edit_singleline(&mut self.data.username)
                     .labelled_by(username_label.id);
 
                 let tags_label = ui.label("Tags");
-                ui.text_edit_multiline(&mut self.tags)
+                ui.text_edit_multiline(&mut self.data.tags)
                     .labelled_by(tags_label.id);
 
-                ui.checkbox(&mut self.random, "Get Random Posts?");
-                ui.checkbox(&mut self.lower_quality, "Get lower quality of posts?");
+                ui.checkbox(&mut self.data.random, "Get Random Posts?");
+                ui.checkbox(&mut self.data.lower_quality, "Get lower quality of posts?");
                 ui.checkbox(
                     &mut self.open_folder,
                     "Open /dl/ folder at download finish?",
@@ -104,7 +104,7 @@ impl eframe::App for App {
             });
             ui.add_space(5.0);
             let slider = ui.add(
-                egui::Slider::new(&mut self.post_amount, 1..=250)
+                egui::Slider::new(&mut self.data.count, 1..=250)
                     .prefix("Download: ")
                     .text("Posts."),
             );
@@ -118,7 +118,7 @@ impl eframe::App for App {
                 } else if open_dl_btn.clicked() {
                     toasts.add(Toast {
                         text: "No Folder found!".into(),
-                        kind: egui_toast::ToastKind::Error,
+                        kind: ToastKind::Error,
                         options: ToastOptions::default()
                             .duration_in_seconds(5.0)
                             .show_progress(true),
@@ -129,7 +129,7 @@ impl eframe::App for App {
                     fs::remove_dir_all("./dl").expect("Couldn't Remove directory.");
                     toasts.add(Toast {
                         text: "Cleared /dl/".into(),
-                        kind: egui_toast::ToastKind::Info,
+                        kind: ToastKind::Info,
                         options: ToastOptions::default()
                             .duration_in_seconds(5.0)
                             .show_progress(true),
@@ -137,7 +137,7 @@ impl eframe::App for App {
                 } else if clear_dl_btn.clicked() {
                     toasts.add(Toast {
                         text: "No Folder found!".into(),
-                        kind: egui_toast::ToastKind::Error,
+                        kind: ToastKind::Error,
                         options: ToastOptions::default()
                             .duration_in_seconds(5.0)
                             .show_progress(true),
@@ -146,34 +146,43 @@ impl eframe::App for App {
                 ui.add_space(5.0);
                 if ui.button("Download Favourites").clicked() {
                     toasts.add(Toast {
-                        kind: egui_toast::ToastKind::Info,
+                        kind: ToastKind::Info,
                         text: "Starting Download...".into(),
                         options: ToastOptions::default()
                             .duration_in_seconds(5.0)
                             .show_progress(true),
                     });
-                    dl_favs(
-                        self.username.clone(),
-                        self.post_amount,
-                        self.random,
-                        self.tags.clone(),
-                        self.lower_quality,
-                        self.api_source.clone(),
+                    dl_favs_btn(
+                        self.data.clone(),
+                        self.data.clone().tx.unwrap().clone(),
                         self.open_folder,
-                        self.tx.clone(),
-                        ctx.clone(),
+                        self.dl_status_tx.clone(),
                     )
                 }
                 ui.add_space(5.0);
-                ui.add_enabled(false, egui::Button::new("Download Posts with Tags"));
+                if ui.button("Download Posts with Tags").clicked() {
+                    toasts.add(Toast {
+                        kind: ToastKind::Info,
+                        text: "Starting Download...".into(),
+                        options: ToastOptions::default()
+                            .duration_in_seconds(5.0)
+                            .show_progress(true),
+                    });
+                    dl_tags_btn(
+                        self.data.clone(),
+                        self.data.clone().tx.unwrap().clone(),
+                        self.open_folder,
+                        self.dl_status_tx.clone(),
+                    )
+                }
 
                 ui.add_space(10.0);
-                if self.dl_count > 0 {
+                if self.downloading_status {
                     ui.spinner();
 
                     ui.label(format!(
                         "Downloading... ({}/{})",
-                        self.dl_count, self.post_amount
+                        self.dl_count, self.data.count
                     ));
 
                     ui.add_space(10.0);
@@ -184,35 +193,31 @@ impl eframe::App for App {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dl_favs(
-    username: String,
-    count: i32,
-    random: bool,
-    tags: String,
-    lower_quality: bool,
-    api_source: String,
-    open_dl_folder: bool,
-    tx: Sender<u64>,
-    ctx: egui::Context,
-) {
+fn dl_favs_btn(data: EHandler, tx: Sender<u64>, open_dl_folder: bool, dl_status_tx: Sender<bool>) {
     tokio::spawn(async move {
-        download_favourites(
-            username,
-            count,
-            random,
-            tags,
-            lower_quality,
-            api_source,
-            tx.clone(),
-            ctx.clone(),
-        )
-        .await;
+        let _ = dl_status_tx.send(true);
+        data.download_favourites().await;
 
         let _ = tx.send(0);
+        let _ = dl_status_tx.send(false);
 
         if open_dl_folder {
-            open_dl_dir()
+            open_dl_dir();
+        }
+    });
+}
+
+fn dl_tags_btn(data: EHandler, tx: Sender<u64>, open_dl_folder: bool, dl_status_tx: Sender<bool>) {
+    tokio::spawn(async move {
+        let _ = dl_status_tx.send(true);
+
+        data.download_with_tags().await;
+
+        let _ = tx.send(0);
+        let _ = dl_status_tx.send(false);
+
+        if open_dl_folder {
+            open_dl_dir();
         }
     });
 }
