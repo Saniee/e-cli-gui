@@ -123,7 +123,10 @@ impl EHandler {
                 println!(
                     "File {}-{}.{} already Exists!\n",
                     artist_name, post.id, post.file.ext
-                )
+                );
+
+                let _ = self.dl_count_tx.as_ref().unwrap().send(1);
+                self.ctx.as_ref().unwrap().request_repaint();
             }
         }
         println!("Download Complete!");

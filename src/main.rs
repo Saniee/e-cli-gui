@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(rustdoc::missing_crate_level_docs)]
 
 use e_handler::EHandler;
@@ -5,6 +6,7 @@ use eframe::egui;
 use egui::{Align2, Color32};
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use std::{path::Path, sync::mpsc::Sender};
+use tokio::task::AbortHandle;
 use util_lib::open_dl_dir;
 
 mod channel_handler;
@@ -31,6 +33,7 @@ struct App {
     post_count: u64,
     open_folder: bool,
     downloading_status: bool,
+    task_abort_handle: Option<AbortHandle>,
 }
 
 impl Default for App {
@@ -50,6 +53,7 @@ impl Default for App {
             post_count: 0,
             open_folder: false,
             downloading_status: false,
+            task_abort_handle: None,
         }
     }
 }
@@ -87,6 +91,7 @@ impl eframe::App for App {
                         .show_progress(true),
                 });
                 let _ = self.channels.finished_status_channel.0.send(false);
+                self.task_abort_handle = None
             }
         }
 
@@ -112,12 +117,11 @@ impl eframe::App for App {
                 )
             });
             ui.add_space(5.0);
-            let slider = ui.add(
+            ui.add(
                 egui::Slider::new(&mut self.data.count, 1..=250)
                     .prefix("Download: ")
                     .text("Posts."),
             );
-            slider.on_hover_text("Amount of posts to download.");
 
             ui.add_space(15.0);
             ui.vertical_centered(|ui| {
@@ -167,13 +171,13 @@ impl eframe::App for App {
                             .show_progress(true),
                     });
 
-                    dl_favs_btn(
+                    self.task_abort_handle = Some(dl_favs_btn(
                         self.data.clone(),
                         self.open_folder,
                         self.channels.dl_count_channel.0.clone(),
                         self.channels.dl_status_channel.0.clone(),
                         self.channels.finished_status_channel.0.clone(),
-                    )
+                    ));
                 }
                 ui.add_space(5.0);
                 if ui.button("Download Posts with Tags").clicked() {
@@ -185,13 +189,13 @@ impl eframe::App for App {
                             .show_progress(true),
                     });
 
-                    dl_tags_btn(
+                    self.task_abort_handle = Some(dl_tags_btn(
                         self.data.clone(),
                         self.open_folder,
                         self.channels.dl_count_channel.0.clone(),
                         self.channels.dl_status_channel.0.clone(),
                         self.channels.finished_status_channel.0.clone(),
-                    )
+                    ));
                 }
 
                 ui.add_space(10.0);
@@ -205,6 +209,22 @@ impl eframe::App for App {
 
                     ui.add_space(10.0);
                 }
+
+                if let Some(handle) = &self.task_abort_handle {
+                    if ui.button("Stop Download").clicked() {
+                        toasts.add(Toast {
+                            kind: ToastKind::Warning,
+                            text: "Aborted Download!".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+                        handle.abort();
+                        let _ = self.channels.dl_count_channel.0.send(0);
+                        let _ = self.channels.dl_status_channel.0.send(false);
+                        self.task_abort_handle = None
+                    }
+                }
             });
             toasts.show(ctx);
         });
@@ -217,8 +237,8 @@ fn dl_favs_btn(
     dl_count_tx: Sender<u64>,
     dl_status_tx: Sender<bool>,
     finished_status_tx: Sender<bool>,
-) {
-    tokio::spawn(async move {
+) -> AbortHandle {
+    let working_thread = tokio::spawn(async move {
         let _ = dl_status_tx.send(true);
         data.download_favourites().await;
 
@@ -230,6 +250,8 @@ fn dl_favs_btn(
             open_dl_dir();
         }
     });
+
+    working_thread.abort_handle()
 }
 
 fn dl_tags_btn(
@@ -238,8 +260,8 @@ fn dl_tags_btn(
     dl_count_tx: Sender<u64>,
     dl_status_tx: Sender<bool>,
     finished_status_tx: Sender<bool>,
-) {
-    tokio::spawn(async move {
+) -> AbortHandle {
+    let working_thread = tokio::spawn(async move {
         let _ = dl_status_tx.send(true);
 
         data.download_with_tags().await;
@@ -252,4 +274,6 @@ fn dl_tags_btn(
             open_dl_dir();
         }
     });
+
+    working_thread.abort_handle()
 }
