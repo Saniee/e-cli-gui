@@ -28,6 +28,7 @@ struct App {
     data: e_handler::EHandler,
     channels: channel_handler::GuiChannels,
     dl_count: u64,
+    post_count: u64,
     open_folder: bool,
     downloading_status: bool,
 }
@@ -37,12 +38,16 @@ impl Default for App {
         let channels = channel_handler::GuiChannels::default();
 
         let mut data = e_handler::EHandler::default();
-        data.define_sender(channels.dl_count_channel.0.clone());
+        data.define_senders(
+            channels.dl_count_channel.0.clone(),
+            channels.post_count_channel.0.clone(),
+        );
 
         Self {
             data,
             channels,
             dl_count: 0,
+            post_count: 0,
             open_folder: false,
             downloading_status: false,
         }
@@ -56,6 +61,10 @@ impl eframe::App for App {
                 self.dl_count = dl_count;
             }
             self.dl_count += dl_count;
+        }
+
+        if let Ok(post_count) = self.channels.post_count_channel.1.try_recv() {
+            self.post_count = post_count
         }
 
         if let Ok(value) = self.channels.dl_status_channel.1.try_recv() {
@@ -191,14 +200,13 @@ impl eframe::App for App {
 
                     ui.label(format!(
                         "Downloading... ({}/{})",
-                        self.dl_count, self.data.count
+                        self.dl_count, self.post_count
                     ));
 
                     ui.add_space(10.0);
                 }
             });
             toasts.show(ctx);
-            ctx.request_repaint();
         });
     }
 }

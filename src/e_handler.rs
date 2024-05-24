@@ -21,6 +21,7 @@ pub struct EHandler {
     pub lower_quality: bool,
     pub api_source: String,
     pub dl_count_tx: Option<Sender<u64>>,
+    pub post_count_tx: Option<Sender<u64>>,
     ctx: Option<egui::Context>,
     client: Client,
 }
@@ -43,6 +44,7 @@ impl Default for EHandler {
             lower_quality: false,
             api_source: "e926.net".to_string(),
             dl_count_tx: None,
+            post_count_tx: None,
             ctx: None,
             client: new_client,
         }
@@ -54,8 +56,9 @@ impl EHandler {
         self.ctx = Some(ctx);
     }
 
-    pub fn define_sender(&mut self, dl_count_tx: Sender<u64>) {
-        self.dl_count_tx = Some(dl_count_tx)
+    pub fn define_senders(&mut self, dl_count_tx: Sender<u64>, post_count_tx: Sender<u64>) {
+        self.dl_count_tx = Some(dl_count_tx);
+        self.post_count_tx = Some(post_count_tx);
     }
 
     fn parse_artists(&self, tags: &Tags) -> String {
@@ -73,6 +76,8 @@ impl EHandler {
     }
 
     async fn handle_download(&self, data: Posts) {
+        let posts_amount = u64::try_from(data.posts.len()).unwrap();
+        let _ = self.post_count_tx.as_ref().unwrap().send(posts_amount);
         for post in data.posts {
             let artist_name = self.parse_artists(&post.tags);
 
