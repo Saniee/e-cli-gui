@@ -23,7 +23,7 @@ jobs:
       - name: Publish Artifacts
         uses: actions/upload-artifact@v4.3.3
         with:
-          path: ./build-dir/release/e-cli
+          path: ./build-dir/release/e-cli-gui
           name: linux_release_x64
   windows-build:
     runs-on: windows-latest
@@ -36,7 +36,7 @@ jobs:
       - name: Publish Artifacts
         uses: actions/upload-artifact@v4.3.3
         with:
-          path: ./build-dir/release/e-cli.exe
+          path: ./build-dir/release/e-cli-gui.exe
           name: windows_release_x64
   draft-release:
     needs: [linux-build, windows-build]
@@ -52,5 +52,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ./build_artifacts/e-cli
-            ./build_artifacts/e-cli.exe
+            ./build_artifacts/e-cli-gui
+            ./build_artifacts/e-cli-gui.exe
