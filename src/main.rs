@@ -19,7 +19,8 @@ async fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(false)
-            .with_inner_size([300.0, 500.0]),
+            .with_inner_size([300.0, 500.0])
+            .with_maximize_button(false),
         ..Default::default()
     };
 
@@ -163,39 +164,59 @@ impl eframe::App for App {
                 ui.add_space(20.0);
                 ui.label("Main Functions:");
                 if ui.button("Download Favourites").clicked() {
-                    toasts.add(Toast {
-                        kind: ToastKind::Info,
-                        text: "Starting Download...".into(),
-                        options: ToastOptions::default()
-                            .duration_in_seconds(1.5)
-                            .show_progress(true),
-                    });
+                    if self.task_abort_handle.is_none() {
+                        toasts.add(Toast {
+                            kind: ToastKind::Info,
+                            text: "Starting Download...".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
 
-                    self.task_abort_handle = Some(dl_favs_btn(
-                        self.data.clone(),
-                        self.open_folder,
-                        self.channels.dl_count_channel.0.clone(),
-                        self.channels.dl_status_channel.0.clone(),
-                        self.channels.finished_status_channel.0.clone(),
-                    ));
+                        self.task_abort_handle = Some(dl_favs_btn(
+                            self.data.clone(),
+                            self.open_folder,
+                            self.channels.dl_count_channel.0.clone(),
+                            self.channels.dl_status_channel.0.clone(),
+                            self.channels.finished_status_channel.0.clone(),
+                        ));
+                    } else {
+                        toasts.add(Toast {
+                            kind: ToastKind::Warning,
+                            text: "Cannot start a new download!".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+                    }
                 }
                 ui.add_space(5.0);
                 if ui.button("Download Posts with Tags").clicked() {
-                    toasts.add(Toast {
-                        kind: ToastKind::Info,
-                        text: "Starting Download...".into(),
-                        options: ToastOptions::default()
-                            .duration_in_seconds(1.5)
-                            .show_progress(true),
-                    });
+                    if self.task_abort_handle.is_none() {
+                        toasts.add(Toast {
+                            kind: ToastKind::Info,
+                            text: "Starting Download...".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
 
-                    self.task_abort_handle = Some(dl_tags_btn(
-                        self.data.clone(),
-                        self.open_folder,
-                        self.channels.dl_count_channel.0.clone(),
-                        self.channels.dl_status_channel.0.clone(),
-                        self.channels.finished_status_channel.0.clone(),
-                    ));
+                        self.task_abort_handle = Some(dl_tags_btn(
+                            self.data.clone(),
+                            self.open_folder,
+                            self.channels.dl_count_channel.0.clone(),
+                            self.channels.dl_status_channel.0.clone(),
+                            self.channels.finished_status_channel.0.clone(),
+                        ));
+                    } else {
+                        toasts.add(Toast {
+                            kind: ToastKind::Warning,
+                            text: "Cannot start a new download!".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+                    }
                 }
 
                 ui.add_space(10.0);
