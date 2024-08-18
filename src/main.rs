@@ -19,7 +19,7 @@ async fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(false)
-            .with_inner_size([300.0, 500.0])
+            .with_inner_size([300.0, 550.0])
             .with_maximize_button(false),
         ..Default::default()
     };
@@ -31,7 +31,6 @@ struct App {
     data: e_handler::EHandler,
     channels: channel_handler::GuiChannels,
     dl_count: u64,
-    post_count: u64,
     open_folder: bool,
     downloading_status: bool,
     task_abort_handle: Option<AbortHandle>,
@@ -42,16 +41,12 @@ impl Default for App {
         let channels = channel_handler::GuiChannels::default();
 
         let mut data = e_handler::EHandler::default();
-        data.define_senders(
-            channels.dl_count_channel.0.clone(),
-            channels.post_count_channel.0.clone(),
-        );
+        data.define_senders(channels.dl_count_channel.0.clone());
 
         Self {
             data,
             channels,
             dl_count: 0,
-            post_count: 0,
             open_folder: false,
             downloading_status: false,
             task_abort_handle: None,
@@ -66,10 +61,6 @@ impl eframe::App for App {
                 self.dl_count = dl_count;
             }
             self.dl_count += dl_count;
-        }
-
-        if let Ok(post_count) = self.channels.post_count_channel.1.try_recv() {
-            self.post_count = post_count
         }
 
         if let Ok(value) = self.channels.dl_status_channel.1.try_recv() {
@@ -123,6 +114,11 @@ impl eframe::App for App {
                     .prefix("Download: ")
                     .text("Posts."),
             );
+            ui.add(
+                egui::Slider::new(&mut self.data.pages, -1..=75)
+                    .prefix("Bulk Get: ")
+                    .text("Pages."),
+            );
 
             ui.add_space(15.0);
             ui.vertical_centered(|ui| {
@@ -138,23 +134,31 @@ impl eframe::App for App {
                             .show_progress(true),
                     });
                 }
-                let clear_dl_btn_style = egui::Button::new("Put the ./dl Folder into Trash")
-                    .fill(Color32::from_rgb(125, 0, 0));
-                let clear_dl_btn = ui.add(clear_dl_btn_style);
+                let clear_dirs_btn_style =
+                    egui::Button::new("Cleanup (Trash data/dl folder if exists)")
+                        .fill(Color32::from_rgb(125, 0, 0));
+                let clear_dirs_btn = ui.add(clear_dirs_btn_style);
 
-                if clear_dl_btn.clicked() && Path::new("./dl").exists() {
-                    let _ = trash::delete("./dl/");
+                if clear_dirs_btn.clicked()
+                    && (Path::new("./dl").exists() || Path::new("./data").exists())
+                {
+                    if Path::new("./dl").exists() {
+                        let _ = trash::delete("./dl");
+                    }
+                    if Path::new("./data").exists() {
+                        let _ = trash::delete("./data");
+                    }
 
                     toasts.add(Toast {
-                        text: "Trashed ./dl !".into(),
+                        text: "Cleaned Up!".into(),
                         kind: ToastKind::Info,
                         options: ToastOptions::default()
                             .duration_in_seconds(1.5)
                             .show_progress(true),
                     });
-                } else if clear_dl_btn.clicked() {
+                } else if clear_dirs_btn.clicked() {
                     toasts.add(Toast {
-                        text: "No Folder found!".into(),
+                        text: "No Folder/s found!".into(),
                         kind: ToastKind::Error,
                         options: ToastOptions::default()
                             .duration_in_seconds(1.5)
@@ -218,15 +222,48 @@ impl eframe::App for App {
                         });
                     }
                 }
+                ui.add_space(5.0);
+                if ui.button("Download Bulk").clicked() {
+                    if self.data.pages == 0 {
+                        toasts.add(Toast {
+                            kind: ToastKind::Info,
+                            text: "You can't get 0 pages.".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+                    } else if self.task_abort_handle.is_none() {
+                        toasts.add(Toast {
+                            kind: ToastKind::Info,
+                            text: "Starting Download...".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+
+                        self.task_abort_handle = Some(dl_bulk_btn(
+                            self.data.clone(),
+                            self.open_folder,
+                            self.channels.dl_count_channel.0.clone(),
+                            self.channels.dl_status_channel.0.clone(),
+                            self.channels.finished_status_channel.0.clone(),
+                        ));
+                    } else {
+                        toasts.add(Toast {
+                            kind: ToastKind::Warning,
+                            text: "Cannot start a new download!".into(),
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+                    }
+                }
 
                 ui.add_space(10.0);
                 if self.downloading_status {
                     ui.spinner();
 
-                    ui.label(format!(
-                        "Downloading... ({}/{})",
-                        self.dl_count, self.post_count
-                    ));
+                    ui.label(format!("Downloading... ({})", self.dl_count));
 
                     ui.add_space(10.0);
                 }
@@ -286,6 +323,30 @@ fn dl_tags_btn(
         let _ = dl_status_tx.send(true);
 
         data.download_with_tags().await;
+
+        let _ = dl_count_tx.send(0);
+        let _ = dl_status_tx.send(false);
+        let _ = finished_status_tx.send(true);
+
+        if open_dl_folder {
+            open_dl_dir();
+        }
+    });
+
+    working_thread.abort_handle()
+}
+
+fn dl_bulk_btn(
+    data: EHandler,
+    open_dl_folder: bool,
+    dl_count_tx: Sender<u64>,
+    dl_status_tx: Sender<bool>,
+    finished_status_tx: Sender<bool>,
+) -> AbortHandle {
+    let working_thread = tokio::spawn(async move {
+        let _ = dl_status_tx.send(true);
+
+        data.get_bulk_data().await;
 
         let _ = dl_count_tx.send(0);
         let _ = dl_status_tx.send(false);

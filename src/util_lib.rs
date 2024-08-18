@@ -34,7 +34,23 @@ pub async fn lower_quality_dl(post: &Post, artist_name: &String) -> f64 {
         if let Some(lower_quality) = &post.sample.alternates.lower_quality {
             // Lower quality videos have multiple urls. Get the first one if the media type is a video
             if lower_quality.media_type == "video" {
-                download(&lower_quality.urls[0], &post.file.ext, post.id, artist_name).await
+                if lower_quality.urls.first().is_some() {
+                    download(
+                        &lower_quality.urls[0].clone().unwrap(),
+                        &post.file.ext,
+                        post.id,
+                        artist_name,
+                    )
+                    .await
+                } else {
+                    download(
+                        &lower_quality.urls[1].clone().unwrap(),
+                        &post.file.ext,
+                        post.id,
+                        artist_name,
+                    )
+                    .await
+                }
             // Get the sample url instead when its an image etc. Since they have only one url.
             } else if let Some(sample_url) = &post.sample.url {
                 download(sample_url, &post.file.ext, post.id, artist_name).await
@@ -76,6 +92,16 @@ pub async fn create_dl_dir() -> bool {
     let dir_path = Path::new("./dl/");
     if !dir_path.exists() {
         create_dir_all("./dl/").await.expect("Err");
+        true
+    } else {
+        false
+    }
+}
+
+pub async fn create_data_dir() -> bool {
+    let dir_path = Path::new("./data/");
+    if !dir_path.exists() {
+        create_dir_all("./data/").await.expect("Err");
         true
     } else {
         false

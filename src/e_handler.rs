@@ -6,24 +6,26 @@ use reqwest::{
     header::{HeaderMap, HeaderValue, USER_AGENT},
     Client,
 };
+use tokio::fs;
 
 use crate::{
     type_defs::api_defs::{Posts, Tags},
-    util_lib::{self, create_dl_dir},
+    util_lib::{self, create_data_dir, create_dl_dir},
 };
 
 #[derive(Clone)]
 pub struct EHandler {
     pub username: String,
     pub count: i32,
+    pub pages: i32,
     pub random: bool,
     pub tags: String,
     pub lower_quality: bool,
     pub api_source: String,
     pub dl_count_tx: Option<Sender<u64>>,
-    pub post_count_tx: Option<Sender<u64>>,
     ctx: Option<egui::Context>,
     client: Client,
+    old_post_count: u64,
 }
 
 impl Default for EHandler {
@@ -39,14 +41,15 @@ impl Default for EHandler {
         Self {
             username: String::new(),
             count: 5,
+            pages: 5,
             random: false,
             tags: String::new(),
             lower_quality: false,
             api_source: "e926.net".to_string(),
             dl_count_tx: None,
-            post_count_tx: None,
             ctx: None,
             client: new_client,
+            old_post_count: 0,
         }
     }
 }
@@ -56,9 +59,8 @@ impl EHandler {
         self.ctx = Some(ctx);
     }
 
-    pub fn define_senders(&mut self, dl_count_tx: Sender<u64>, post_count_tx: Sender<u64>) {
+    pub fn define_senders(&mut self, dl_count_tx: Sender<u64>) {
         self.dl_count_tx = Some(dl_count_tx);
-        self.post_count_tx = Some(post_count_tx);
     }
 
     fn parse_artists(&self, tags: &Tags) -> String {
@@ -76,8 +78,6 @@ impl EHandler {
     }
 
     async fn handle_download(&self, data: Posts) {
-        let posts_amount = u64::try_from(data.posts.len()).unwrap();
-        let _ = self.post_count_tx.as_ref().unwrap().send(posts_amount);
         for post in data.posts {
             let artist_name = self.parse_artists(&post.tags);
 
@@ -211,5 +211,98 @@ impl EHandler {
         }
 
         self.handle_download(data).await;
+    }
+
+    pub async fn get_bulk_data(&self) {
+        println!("Downloading posts, into the ./dl/ folder!\n");
+
+        let random_check: &str = if self.random { "order:random" } else { "" };
+
+        let tags: &str = if !self.tags.is_empty() {
+            &self.tags
+        } else {
+            ""
+        };
+
+        let fav = if !self.username.is_empty() {
+            format!("fav:{:?}", self.username)
+        } else {
+            "".to_owned()
+        };
+
+        if Path::new("./data/").exists() {
+            let _ = trash::delete("./data/");
+        }
+        create_data_dir().await;
+
+        let mut page = 0;
+        #[allow(unused_assignments)]
+        let mut num_file = 0;
+
+        loop {
+            if self.pages != -1 && page == self.pages {
+                num_file = page;
+                break;
+            }
+
+            let target: String = format!(
+                "https://{}/posts.json?tags={} {} {}&limit={}&page={}",
+                self.api_source,
+                fav,
+                tags,
+                random_check,
+                self.count,
+                page + 1
+            );
+
+            let data: Posts = self
+                .client
+                .get(target)
+                .send()
+                .await
+                .expect("Err")
+                .json::<Posts>()
+                .await
+                .expect("Err");
+
+            //println!("\n\n\n\n{:?}", data);
+            if data.posts.is_empty() {
+                num_file = page;
+                break;
+            }
+
+            let _ = fs::write(
+                format!("./data/post_page_{}.json", page + 1),
+                serde_json::to_string(&data).unwrap(),
+            )
+            .await;
+
+            page += 1
+        }
+
+        println!("Finished getting data! Num. of data files: {}", num_file);
+
+        page = 0;
+
+        let created_dir = create_dl_dir().await;
+        if created_dir {
+            println!("Created a ./dl/ directory for all the downloaded files.\n")
+        }
+
+        loop {
+            if page == num_file {
+                break;
+            }
+
+            let contents = fs::read_to_string(format!("./data/post_page_{}.json", page + 1))
+                .await
+                .expect("Err");
+            let data: Posts = serde_json::from_str(&contents).expect("Err");
+            //println!("{:?}", data);
+
+            self.handle_download(data).await;
+
+            page += 1
+        }
     }
 }

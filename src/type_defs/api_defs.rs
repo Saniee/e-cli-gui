@@ -43,5 +43,5 @@ pub struct Alternates {
 pub struct LowerQuality {
     #[serde(rename = "type")]
     pub media_type: String,
-    pub urls: Vec<String>,
+    pub urls: Vec<Option<String>>,
 }
