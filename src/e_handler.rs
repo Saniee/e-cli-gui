@@ -23,6 +23,7 @@ pub struct EHandler {
     pub lower_quality: bool,
     pub api_source: String,
     pub dl_count_tx: Option<Sender<u64>>,
+    pub post_count_tx: Option<Sender<u64>>,
     ctx: Option<egui::Context>,
     client: Client,
     old_post_count: u64,
@@ -47,6 +48,7 @@ impl Default for EHandler {
             lower_quality: false,
             api_source: "e926.net".to_string(),
             dl_count_tx: None,
+            post_count_tx: None,
             ctx: None,
             client: new_client,
             old_post_count: 0,
@@ -59,8 +61,9 @@ impl EHandler {
         self.ctx = Some(ctx);
     }
 
-    pub fn define_senders(&mut self, dl_count_tx: Sender<u64>) {
+    pub fn define_senders(&mut self, dl_count_tx: Sender<u64>, post_count_tx: Sender<u64>) {
         self.dl_count_tx = Some(dl_count_tx);
+        self.post_count_tx = Some(post_count_tx);
     }
 
     fn parse_artists(&self, tags: &Tags) -> String {
@@ -133,6 +136,8 @@ impl EHandler {
     }
 
     pub async fn download_favourites(&self) {
+        let _ = self.post_count_tx.as_ref().unwrap().send(0);
+
         println!(
             "Downloading {} Favorites of {} into the ./dl/ folder!\n",
             self.count, self.username
@@ -166,6 +171,9 @@ impl EHandler {
                 println!("No post found...");
             }
 
+            let posts_amount = u64::try_from(data.posts.len()).unwrap();
+            let _ = self.post_count_tx.as_ref().unwrap().send(posts_amount);
+
             let created_dir = create_dl_dir().await;
             if created_dir {
                 println!("Created a ./dl/ directory for all the downloaded files.\n")
@@ -176,6 +184,8 @@ impl EHandler {
     }
 
     pub async fn download_with_tags(&self) {
+        let _ = self.post_count_tx.as_ref().unwrap().send(0);
+
         println!("Downloading posts, into the ./dl/ folder!\n");
 
         let random_check: &str = if self.random { "order:random" } else { "" };
@@ -205,6 +215,9 @@ impl EHandler {
             println!("No post found...");
         }
 
+        let posts_amount = u64::try_from(data.posts.len()).unwrap();
+        let _ = self.post_count_tx.as_ref().unwrap().send(posts_amount);
+
         let created_dir = create_dl_dir().await;
         if created_dir {
             println!("Created a ./dl/ directory for all the downloaded files.\n")
@@ -214,6 +227,8 @@ impl EHandler {
     }
 
     pub async fn get_bulk_data(&self) {
+        let _ = self.post_count_tx.as_ref().unwrap().send(0);
+
         println!("Downloading posts, into the ./dl/ folder!\n");
 
         let random_check: &str = if self.random { "order:random" } else { "" };
@@ -238,6 +253,7 @@ impl EHandler {
         let mut page = 0;
         #[allow(unused_assignments)]
         let mut num_file = 0;
+        let mut posts_amount: u64 = 0;
 
         loop {
             if self.pages != -1 && page == self.pages {
@@ -271,6 +287,8 @@ impl EHandler {
                 break;
             }
 
+            posts_amount += u64::try_from(data.posts.len()).unwrap();
+
             let _ = fs::write(
                 format!("./data/post_page_{}.json", page + 1),
                 serde_json::to_string(&data).unwrap(),
@@ -288,6 +306,8 @@ impl EHandler {
         if created_dir {
             println!("Created a ./dl/ directory for all the downloaded files.\n")
         }
+
+        let _ = self.post_count_tx.as_ref().unwrap().send(posts_amount);
 
         loop {
             if page == num_file {
