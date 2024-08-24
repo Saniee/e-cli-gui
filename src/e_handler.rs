@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-use std::{cmp::Ordering, path::Path, sync::mpsc::Sender};
+use std::{cmp::Ordering, fs, path::Path, sync::mpsc::Sender};
 
 use reqwest::{
     header::{HeaderMap, HeaderValue, USER_AGENT},
     Client,
 };
-use tokio::fs;
+use tokio::fs as tokio_fs;
 
 use crate::{
     type_defs::api_defs::{Posts, Tags},
@@ -16,6 +16,7 @@ use crate::{
 #[derive(Clone)]
 pub struct EHandler {
     pub username: String,
+    api_key: String,
     pub count: i32,
     pub pages: i32,
     pub random: bool,
@@ -41,6 +42,7 @@ impl Default for EHandler {
 
         Self {
             username: String::new(),
+            api_key: String::new(),
             count: 5,
             pages: 5,
             random: false,
@@ -61,6 +63,26 @@ impl EHandler {
         self.ctx = Some(ctx);
     }
 
+    pub fn check_api_key(&mut self) -> bool {
+        if Path::new("./key").exists() {
+            let key = fs::read_to_string("./key").expect("Err");
+            if !key.is_empty() {
+                self.api_key = key;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_api_key(&mut self) {
+        if !self.api_key.is_empty() {
+            self.api_key = String::new();
+        }
+    }
+
     pub fn define_senders(&mut self, dl_count_tx: Sender<u64>, post_count_tx: Sender<u64>) {
         self.dl_count_tx = Some(dl_count_tx);
         self.post_count_tx = Some(post_count_tx);
@@ -77,6 +99,29 @@ impl EHandler {
             }
             Ordering::Equal => tags.artist[0].to_string(),
             Ordering::Less => "unknown-artist".to_string(),
+        }
+    }
+
+    async fn handle_request(&self, target: String) -> Posts {
+        if !self.api_key.is_empty() {
+            self.client
+                .get(target)
+                .basic_auth(self.username.clone(), Some(self.api_key.clone()))
+                .send()
+                .await
+                .expect("Err")
+                .json::<Posts>()
+                .await
+                .expect("Err")
+        } else {
+            self.client
+                .get(target)
+                .send()
+                .await
+                .expect("Err")
+                .json::<Posts>()
+                .await
+                .expect("Err")
         }
     }
 
@@ -157,15 +202,7 @@ impl EHandler {
                 self.api_source, self.username, tags, random_check, self.count
             );
 
-            let data: Posts = self
-                .client
-                .get(target)
-                .send()
-                .await
-                .expect("Err")
-                .json::<Posts>()
-                .await
-                .expect("Err");
+            let data: Posts = self.handle_request(target).await;
 
             if data.posts.is_empty() {
                 println!("No post found...");
@@ -201,15 +238,7 @@ impl EHandler {
             self.api_source, tags, random_check, self.count
         );
 
-        let data: Posts = self
-            .client
-            .get(target)
-            .send()
-            .await
-            .expect("Err")
-            .json::<Posts>()
-            .await
-            .expect("Err");
+        let data: Posts = self.handle_request(target).await;
 
         if data.posts.is_empty() {
             println!("No post found...");
@@ -271,15 +300,7 @@ impl EHandler {
                 page + 1
             );
 
-            let data: Posts = self
-                .client
-                .get(target)
-                .send()
-                .await
-                .expect("Err")
-                .json::<Posts>()
-                .await
-                .expect("Err");
+            let data: Posts = self.handle_request(target).await;
 
             //println!("\n\n\n\n{:?}", data);
             if data.posts.is_empty() {
@@ -289,7 +310,7 @@ impl EHandler {
 
             posts_amount += u64::try_from(data.posts.len()).unwrap();
 
-            let _ = fs::write(
+            let _ = tokio_fs::write(
                 format!("./data/post_page_{}.json", page + 1),
                 serde_json::to_string(&data).unwrap(),
             )
@@ -314,7 +335,7 @@ impl EHandler {
                 break;
             }
 
-            let contents = fs::read_to_string(format!("./data/post_page_{}.json", page + 1))
+            let contents = tokio_fs::read_to_string(format!("./data/post_page_{}.json", page + 1))
                 .await
                 .expect("Err");
             let data: Posts = serde_json::from_str(&contents).expect("Err");

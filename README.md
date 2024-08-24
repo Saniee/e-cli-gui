@@ -11,6 +11,7 @@ What it can do:
 - [x] Downloading Favourites from a Username
 - [x] Downloading Posts with specified Tags
 - [x] Downloading Multiple Pages of Posts, either Favourites or with Tags.. or combined!
+- [x] Login with your API Key to download every post!
 
 # Usage
 ## Just run the .exe or the linux binary (without any extension).

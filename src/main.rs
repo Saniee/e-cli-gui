@@ -19,7 +19,7 @@ async fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(false)
-            .with_inner_size([300.0, 550.0])
+            .with_inner_size([300.0, 650.0])
             .with_maximize_button(false),
         ..Default::default()
     };
@@ -105,6 +105,44 @@ impl eframe::App for App {
                 let username_label = ui.label("Username");
                 ui.text_edit_singleline(&mut self.data.username)
                     .labelled_by(username_label.id);
+                ui.add_space(5.0);
+                ui.label(
+                    "The API key is taken from a file called 'key' located where the .exe is.",
+                );
+                ui.add_space(5.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Set API Key").clicked() {
+                        let check_status = self.data.check_api_key();
+                        if check_status {
+                            toasts.add(Toast {
+                                text: "API Key Loaded!".into(),
+                                kind: ToastKind::Info,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(1.5)
+                                    .show_progress(true),
+                            });
+                        } else {
+                            toasts.add(Toast {
+                                text: "API Key File Not Found!".into(),
+                                kind: ToastKind::Warning,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(1.5)
+                                    .show_progress(true),
+                            });
+                        }
+                    }
+                    if ui.button("Clear API Key").clicked() {
+                        self.data.clear_api_key();
+                        toasts.add(Toast {
+                            text: "API Key Cleared!".into(),
+                            kind: ToastKind::Info,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(1.5)
+                                .show_progress(true),
+                        });
+                    }
+                });
+                ui.add_space(5.0);
 
                 let tags_label = ui.label("Tags");
                 ui.text_edit_multiline(&mut self.data.tags)
