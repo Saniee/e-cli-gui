@@ -34,7 +34,7 @@ pub async fn lower_quality_dl(post: &Post, artist_name: &String) -> f64 {
         if let Some(lower_quality) = &post.sample.alternates.lower_quality {
             // Lower quality videos have multiple urls. Get the first one if the media type is a video
             if lower_quality.media_type == "video" {
-                if lower_quality.urls.first().is_some() {
+                if !lower_quality.urls.is_empty() {
                     download(
                         &lower_quality.urls[0].clone().unwrap(),
                         &post.file.ext,
@@ -109,8 +109,8 @@ pub async fn create_data_dir() -> bool {
 }
 
 pub fn open_dl_dir() {
-    std::process::Command::new("explorer")
+    let _ = std::process::Command::new("explorer")
         .arg(r".\dl")
         .spawn()
-        .unwrap();
+        .unwrap().wait();
 }

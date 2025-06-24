@@ -19,7 +19,7 @@ async fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(false)
-            .with_inner_size([300.0, 650.0])
+            .with_inner_size([300.0, 600.0])
             .with_maximize_button(false),
         ..Default::default()
     };
@@ -61,6 +61,8 @@ impl Default for App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Thread channels. 
+        
         if let Ok(dl_count) = self.channels.dl_count_channel.1.try_recv() {
             if dl_count < 1 {
                 self.dl_count = dl_count;
@@ -78,6 +80,7 @@ impl eframe::App for App {
 
         self.data.define_gui(ctx.clone());
 
+        // Toasts
         let mut toasts = Toasts::new()
             .anchor(Align2::CENTER_BOTTOM, (0.0, -8.0))
             .direction(egui::Direction::BottomUp);
@@ -96,14 +99,17 @@ impl eframe::App for App {
             }
         }
 
+        // Main UI
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
+            ui.horizontal(|ui| {
                 let api_source_label = ui.label("Api Source");
-                ui.text_edit_singleline(&mut self.data.api_source)
+                ui.add(egui::TextEdit::singleline(&mut self.data.api_source).hint_text("e926.net").desired_width(100.0))
                     .labelled_by(api_source_label.id);
-
+            });
+            ui.add_space(5.0);
+            ui.vertical(|ui| {
                 let username_label = ui.label("Username");
-                ui.text_edit_singleline(&mut self.data.username)
+                ui.add(egui::TextEdit::singleline(&mut self.data.username).desired_width(100.0))
                     .labelled_by(username_label.id);
                 ui.add_space(5.0);
                 ui.label(
@@ -131,6 +137,7 @@ impl eframe::App for App {
                             });
                         }
                     }
+                    ui.add_space(2.5);
                     if ui.button("Clear API Key").clicked() {
                         self.data.clear_api_key();
                         toasts.add(Toast {
@@ -142,12 +149,12 @@ impl eframe::App for App {
                         });
                     }
                 });
-                ui.add_space(5.0);
+                ui.add_space(10.0);
 
-                let tags_label = ui.label("Tags");
-                ui.text_edit_multiline(&mut self.data.tags)
+                let tags_label = ui.label("Tags to Search/Filter for:");
+                ui.add(egui::TextEdit::multiline(&mut self.data.tags).desired_width(300.0).char_limit(250))
                     .labelled_by(tags_label.id);
-
+                ui.add_space(10.0);
                 ui.checkbox(&mut self.data.random, "Get Random Posts?");
                 ui.checkbox(&mut self.data.lower_quality, "Get lower quality of posts?");
                 ui.checkbox(
@@ -155,7 +162,7 @@ impl eframe::App for App {
                     "Open /dl/ folder at download finish?",
                 )
             });
-            ui.add_space(5.0);
+            ui.add_space(10.0);
             ui.add(
                 egui::Slider::new(&mut self.data.count, 1..=250)
                     .prefix("Download: ")
@@ -168,7 +175,7 @@ impl eframe::App for App {
             );
 
             ui.add_space(15.0);
-            ui.vertical_centered(|ui| {
+            ui.vertical(|ui| {
                 let open_dl_btn = ui.button("Open the ./dl Folder with Explorer");
                 if open_dl_btn.clicked() && Path::new("./dl").exists() {
                     open_dl_dir()
@@ -212,7 +219,7 @@ impl eframe::App for App {
                             .show_progress(true),
                     });
                 };
-                ui.add_space(20.0);
+                ui.add_space(10.0);
                 ui.label("Main Functions:");
                 if ui.button("Download Favourites").clicked() {
                     if self.task_abort_handle.is_none() {

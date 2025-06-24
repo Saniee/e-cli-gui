@@ -102,7 +102,7 @@ impl EHandler {
         }
     }
 
-    async fn handle_request(&self, target: String) -> Posts {
+    async fn handle_api_request(&self, target: String) -> Posts {
         if !self.api_key.is_empty() {
             self.client
                 .get(target)
@@ -202,7 +202,7 @@ impl EHandler {
                 self.api_source, self.username, tags, random_check, self.count
             );
 
-            let data: Posts = self.handle_request(target).await;
+            let data: Posts = self.handle_api_request(target).await;
 
             if data.posts.is_empty() {
                 println!("No post found...");
@@ -238,7 +238,7 @@ impl EHandler {
             self.api_source, tags, random_check, self.count
         );
 
-        let data: Posts = self.handle_request(target).await;
+        let data: Posts = self.handle_api_request(target).await;
 
         if data.posts.is_empty() {
             println!("No post found...");
@@ -300,7 +300,7 @@ impl EHandler {
                 page + 1
             );
 
-            let data: Posts = self.handle_request(target).await;
+            let data: Posts = self.handle_api_request(target).await;
 
             //println!("\n\n\n\n{:?}", data);
             if data.posts.is_empty() {
