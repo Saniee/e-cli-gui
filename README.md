@@ -1,8 +1,8 @@
 # E-Cli-GUI
 
-[![Release Build](https://github.com/Saniee/e-cli-gui/actions/workflows/rust.yml/badge.svg)](https://github.com/Saniee/e-cli-gui/actions/workflows/rust.yml) <br>
+[![Build binaries](https://codeberg.org/Saniee/e-cli-gui/actions/workflows/build.yml/badge.svg)](https://codeberg.org/Saniee/e-cli-gui/actions/workflows/build.yml) <br>
 
-The Graphical Interface version of [E-Cli](https://github.com/Saniee/e-cli) <br>
+The Graphical Interface version of [E-Cli](https://codeberg.org/Saniee/e-cli) <br>
 ~~Not as feature complete, but much easier to use.~~ <br>
 Now quite better then the CLI.
 
