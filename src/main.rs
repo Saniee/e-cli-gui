@@ -1,418 +1,461 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![allow(rustdoc::missing_crate_level_docs)]
 
-use e_handler::EHandler;
+mod backend;
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+
+use backend::{DownloadSettings, JobKind, Progress, ZipEvent};
+use e_cli::cli::ArchiveFormat;
 use eframe::egui;
-use egui::{Align2, Color32};
+use egui::{Align2, Color32, RichText};
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
-use std::{path::Path, sync::mpsc::Sender};
-use tokio::task::AbortHandle;
-use util_lib::open_dl_dir;
 
-mod channel_handler;
-mod e_handler;
-mod type_defs;
-mod util_lib;
+const DL_DIR: &str = "./dl";
+const KEY_FILE: &str = "./key";
 
-#[tokio::main]
-async fn main() {
+fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_resizable(false)
-            .with_inner_size([300.0, 600.0])
-            .with_maximize_button(false),
+            .with_inner_size([420.0, 640.0])
+            .with_min_inner_size([360.0, 480.0]),
         ..Default::default()
     };
 
-    let _ = eframe::run_native("E-CLI GUI", options, Box::new(|_| Box::<App>::default()));
+    eframe::run_native(
+        "E-CLI GUI",
+        options,
+        Box::new(|cc| {
+            egui_extras_setup(&cc.egui_ctx);
+            Ok(Box::<App>::default())
+        }),
+    )
+}
+
+fn egui_extras_setup(ctx: &egui::Context) {
+    ctx.set_visuals(egui::Visuals::dark());
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Tab {
+    Favourites,
+    Tags,
+    Pool,
+    Utilities,
+}
+
+struct ActiveJob {
+    label: &'static str,
+    cancel: Arc<AtomicBool>,
+    rx: Receiver<Progress>,
+    completed: u64,
+    total: Option<u64>,
+}
+
+struct ActiveZip {
+    rx: Receiver<ZipEvent>,
 }
 
 struct App {
-    data: e_handler::EHandler,
-    channels: channel_handler::GuiChannels,
-    dl_count: u64,
-    post_count: u64,
-    open_folder: bool,
-    downloading_status: bool,
-    task_abort_handle: Option<AbortHandle>,
+    tab: Tab,
+
+    api_source: String,
+    username: String,
+    api_key: String,
+    tags: String,
+    count: u32,
+    pages: i64,
+    threads: usize,
+    random: bool,
+    lower_quality: bool,
+    open_folder_after: bool,
+
+    pool_id: String,
+    zip_name: String,
+    zip_format: ArchiveFormat,
+
+    job: Option<ActiveJob>,
+    zip_job: Option<ActiveZip>,
+
+    pending_toasts: Vec<(String, ToastKind)>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let channels = channel_handler::GuiChannels::default();
-
-        let mut data = e_handler::EHandler::default();
-        data.define_senders(
-            channels.dl_count_channel.0.clone(),
-            channels.post_count_channel.0.clone(),
-        );
-
         Self {
-            data,
-            channels,
-            dl_count: 0,
-            post_count: 0,
-            open_folder: false,
-            downloading_status: false,
-            task_abort_handle: None,
+            tab: Tab::Favourites,
+            api_source: "e926.net".to_string(),
+            username: String::new(),
+            api_key: String::new(),
+            tags: String::new(),
+            count: 75,
+            pages: -1,
+            threads: 5,
+            random: false,
+            lower_quality: false,
+            open_folder_after: false,
+            pool_id: String::new(),
+            zip_name: String::new(),
+            zip_format: ArchiveFormat::Cbz,
+            job: None,
+            zip_job: None,
+            pending_toasts: Vec::new(),
+        }
+    }
+}
+
+impl App {
+    fn download_settings(&self) -> DownloadSettings {
+        DownloadSettings {
+            api_source: self.api_source.clone(),
+            username: self.username.clone(),
+            api_key: self.api_key.clone(),
+            tags: self.tags.clone(),
+            count: self.count,
+            pages: self.pages,
+            threads: self.threads,
+            random: self.random,
+            lower_quality: self.lower_quality,
+        }
+    }
+
+    fn start_job(&mut self, kind: JobKind, label: &'static str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        backend::spawn_download(
+            kind,
+            self.download_settings(),
+            PathBuf::from(DL_DIR),
+            cancel.clone(),
+            tx,
+        );
+        self.job = Some(ActiveJob {
+            label,
+            cancel,
+            rx,
+            completed: 0,
+            total: None,
+        });
+        self.toast(format!("Starting {label} download..."), ToastKind::Info);
+    }
+
+    fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
+        self.pending_toasts.push((text.into(), kind));
+    }
+
+    fn poll_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = &mut self.job else { return };
+        let mut finished_msg: Option<(String, ToastKind)> = None;
+
+        while let Ok(progress) = job.rx.try_recv() {
+            match progress {
+                Progress::Total(total) => job.total = Some(total),
+                Progress::Tick => job.completed += 1,
+                Progress::Finished(stats) => {
+                    finished_msg = Some((
+                        format!(
+                            "Finished! {} downloaded, {} failed (of {}).",
+                            stats.completed, stats.failed, stats.total
+                        ),
+                        ToastKind::Success,
+                    ));
+                }
+                Progress::Error(err) => {
+                    finished_msg = Some((err, ToastKind::Error));
+                }
+            }
+            ctx.request_repaint();
+        }
+
+        if let Some((text, kind)) = finished_msg {
+            self.toast(text, kind);
+            let open_folder = self.open_folder_after;
+            self.job = None;
+            if open_folder {
+                open_dl_dir();
+            }
+        }
+    }
+
+    fn poll_zip(&mut self) {
+        let Some(zip_job) = &self.zip_job else { return };
+        if let Ok(ZipEvent::Finished(ok)) = zip_job.rx.try_recv() {
+            if ok {
+                self.toast("Archive created!", ToastKind::Success);
+            } else {
+                self.toast("Failed to create archive. Is 7z on PATH?", ToastKind::Error);
+            }
+            self.zip_job = None;
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Thread channels. 
-        
-        if let Ok(dl_count) = self.channels.dl_count_channel.1.try_recv() {
-            if dl_count < 1 {
-                self.dl_count = dl_count;
-            }
-            self.dl_count += dl_count;
-        }
+        self.poll_job(ctx);
+        self.poll_zip();
 
-        if let Ok(post_count) = self.channels.post_count_channel.1.try_recv() {
-            self.post_count = post_count
-        }
-
-        if let Ok(value) = self.channels.dl_status_channel.1.try_recv() {
-            self.downloading_status = value
-        }
-
-        self.data.define_gui(ctx.clone());
-
-        // Toasts
         let mut toasts = Toasts::new()
             .anchor(Align2::CENTER_BOTTOM, (0.0, -8.0))
             .direction(egui::Direction::BottomUp);
 
-        if let Ok(finished) = self.channels.finished_status_channel.1.try_recv() {
-            if finished {
-                toasts.add(Toast {
-                    kind: ToastKind::Info,
-                    text: "Finished Downloading!".into(),
-                    options: ToastOptions::default()
-                        .duration_in_seconds(1.5)
-                        .show_progress(true),
-                });
-                let _ = self.channels.finished_status_channel.0.send(false);
-                self.task_abort_handle = None
-            }
+        for (text, kind) in self.pending_toasts.drain(..) {
+            toasts.add(Toast {
+                text: text.into(),
+                kind,
+                options: ToastOptions::default()
+                    .duration_in_seconds(2.5)
+                    .show_progress(true),
+                ..Default::default()
+            });
         }
 
-        // Main UI
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let api_source_label = ui.label("Api Source");
-                ui.add(egui::TextEdit::singleline(&mut self.data.api_source).hint_text("e926.net").desired_width(100.0))
-                    .labelled_by(api_source_label.id);
+                ui.selectable_value(&mut self.tab, Tab::Favourites, "Favourites");
+                ui.selectable_value(&mut self.tab, Tab::Tags, "Tags");
+                ui.selectable_value(&mut self.tab, Tab::Pool, "Pool");
+                ui.selectable_value(&mut self.tab, Tab::Utilities, "Utilities");
             });
-            ui.add_space(5.0);
-            ui.vertical(|ui| {
-                let username_label = ui.label("Username");
-                ui.add(egui::TextEdit::singleline(&mut self.data.username).desired_width(100.0))
-                    .labelled_by(username_label.id);
-                ui.add_space(5.0);
-                ui.label(
-                    "The API key is taken from a file called 'key' located where the .exe is.",
-                );
-                ui.add_space(5.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Set API Key").clicked() {
-                        let check_status = self.data.check_api_key();
-                        if check_status {
-                            toasts.add(Toast {
-                                text: "API Key Loaded!".into(),
-                                kind: ToastKind::Info,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(1.5)
-                                    .show_progress(true),
-                            });
-                        } else {
-                            toasts.add(Toast {
-                                text: "API Key File Not Found!".into(),
-                                kind: ToastKind::Warning,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(1.5)
-                                    .show_progress(true),
-                            });
-                        }
-                    }
-                    ui.add_space(2.5);
-                    if ui.button("Clear API Key").clicked() {
-                        self.data.clear_api_key();
-                        toasts.add(Toast {
-                            text: "API Key Cleared!".into(),
-                            kind: ToastKind::Info,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-                    }
-                });
-                ui.add_space(10.0);
-
-                let tags_label = ui.label("Tags to Search/Filter for:");
-                ui.add(egui::TextEdit::multiline(&mut self.data.tags).desired_width(300.0).char_limit(250))
-                    .labelled_by(tags_label.id);
-                ui.add_space(10.0);
-                ui.checkbox(&mut self.data.random, "Get Random Posts?");
-                ui.checkbox(&mut self.data.lower_quality, "Get lower quality of posts?");
-                ui.checkbox(
-                    &mut self.open_folder,
-                    "Open /dl/ folder at download finish?",
-                )
-            });
-            ui.add_space(10.0);
-            ui.add(
-                egui::Slider::new(&mut self.data.count, 1..=250)
-                    .prefix("Download: ")
-                    .text("Posts."),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.data.pages, -1..=75)
-                    .prefix("Bulk Get: ")
-                    .text("Pages."),
-            );
-
-            ui.add_space(15.0);
-            ui.vertical(|ui| {
-                let open_dl_btn = ui.button("Open the ./dl Folder with Explorer");
-                if open_dl_btn.clicked() && Path::new("./dl").exists() {
-                    open_dl_dir()
-                } else if open_dl_btn.clicked() {
-                    toasts.add(Toast {
-                        text: "No Folder found!".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(1.5)
-                            .show_progress(true),
-                    });
-                }
-                let clear_dirs_btn_style =
-                    egui::Button::new("Cleanup (Trash data/dl folder if exists)")
-                        .fill(Color32::from_rgb(125, 0, 0));
-                let clear_dirs_btn = ui.add(clear_dirs_btn_style);
-
-                if clear_dirs_btn.clicked()
-                    && (Path::new("./dl").exists() || Path::new("./data").exists())
-                {
-                    if Path::new("./dl").exists() {
-                        let _ = trash::delete("./dl");
-                    }
-                    if Path::new("./data").exists() {
-                        let _ = trash::delete("./data");
-                    }
-
-                    toasts.add(Toast {
-                        text: "Cleaned Up!".into(),
-                        kind: ToastKind::Info,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(1.5)
-                            .show_progress(true),
-                    });
-                } else if clear_dirs_btn.clicked() {
-                    toasts.add(Toast {
-                        text: "No Folder/s found!".into(),
-                        kind: ToastKind::Error,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(1.5)
-                            .show_progress(true),
-                    });
-                };
-                ui.add_space(10.0);
-                ui.label("Main Functions:");
-                if ui.button("Download Favourites").clicked() {
-                    if self.task_abort_handle.is_none() {
-                        toasts.add(Toast {
-                            kind: ToastKind::Info,
-                            text: "Starting Download...".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-
-                        self.task_abort_handle = Some(dl_favs_btn(
-                            self.data.clone(),
-                            self.open_folder,
-                            self.channels.dl_count_channel.0.clone(),
-                            self.channels.dl_status_channel.0.clone(),
-                            self.channels.finished_status_channel.0.clone(),
-                        ));
-                    } else {
-                        toasts.add(Toast {
-                            kind: ToastKind::Warning,
-                            text: "Cannot start a new download!".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-                    }
-                }
-                ui.add_space(5.0);
-                if ui.button("Download Posts with Tags").clicked() {
-                    if self.task_abort_handle.is_none() {
-                        toasts.add(Toast {
-                            kind: ToastKind::Info,
-                            text: "Starting Download...".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-
-                        self.task_abort_handle = Some(dl_tags_btn(
-                            self.data.clone(),
-                            self.open_folder,
-                            self.channels.dl_count_channel.0.clone(),
-                            self.channels.dl_status_channel.0.clone(),
-                            self.channels.finished_status_channel.0.clone(),
-                        ));
-                    } else {
-                        toasts.add(Toast {
-                            kind: ToastKind::Warning,
-                            text: "Cannot start a new download!".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-                    }
-                }
-                ui.add_space(5.0);
-                if ui.button("Download Bulk").clicked() {
-                    if self.data.pages == 0 {
-                        toasts.add(Toast {
-                            kind: ToastKind::Info,
-                            text: "You can't get 0 pages.".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-                    } else if self.task_abort_handle.is_none() {
-                        toasts.add(Toast {
-                            kind: ToastKind::Info,
-                            text: "Starting Download...".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-
-                        self.task_abort_handle = Some(dl_bulk_btn(
-                            self.data.clone(),
-                            self.open_folder,
-                            self.channels.dl_count_channel.0.clone(),
-                            self.channels.dl_status_channel.0.clone(),
-                            self.channels.finished_status_channel.0.clone(),
-                        ));
-                    } else {
-                        toasts.add(Toast {
-                            kind: ToastKind::Warning,
-                            text: "Cannot start a new download!".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-                    }
-                }
-
-                ui.add_space(10.0);
-                if self.downloading_status {
-                    ui.spinner();
-
-                    ui.label(format!(
-                        "Downloading... ({}/{})",
-                        self.dl_count, self.post_count
-                    ));
-
-                    ui.add_space(10.0);
-                }
-
-                if let Some(handle) = &self.task_abort_handle {
-                    if ui.button("Stop Download").clicked() {
-                        toasts.add(Toast {
-                            kind: ToastKind::Warning,
-                            text: "Aborted Download!".into(),
-                            options: ToastOptions::default()
-                                .duration_in_seconds(1.5)
-                                .show_progress(true),
-                        });
-                        handle.abort();
-                        let _ = self.channels.dl_count_channel.0.send(0);
-                        let _ = self.channels.dl_status_channel.0.send(false);
-                        self.task_abort_handle = None
-                    }
-                }
-            });
-            toasts.show(ctx);
+            ui.add_space(4.0);
         });
+
+        egui::TopBottomPanel::bottom("progress").show(ctx, |ui| {
+            ui.add_space(6.0);
+            self.progress_ui(ui);
+            ui.add_space(6.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Favourites => self.favourites_ui(ui),
+            Tab::Tags => self.tags_ui(ui),
+            Tab::Pool => self.pool_ui(ui),
+            Tab::Utilities => self.utilities_ui(ui),
+        });
+
+        toasts.show(ctx);
     }
 }
 
-fn dl_favs_btn(
-    data: EHandler,
-    open_dl_folder: bool,
-    dl_count_tx: Sender<u64>,
-    dl_status_tx: Sender<bool>,
-    finished_status_tx: Sender<bool>,
-) -> AbortHandle {
-    let working_thread = tokio::spawn(async move {
-        let _ = dl_status_tx.send(true);
-        data.download_favourites().await;
+impl App {
+    fn shared_settings_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Connection settings")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("API source");
+                    ui.text_edit_singleline(&mut self.api_source);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Load API key").clicked() {
+                        match std::fs::read_to_string(KEY_FILE) {
+                            Ok(key) if !key.trim().is_empty() => {
+                                self.api_key = key.trim().to_string();
+                                self.toast("API key loaded!", ToastKind::Success);
+                            }
+                            _ => self.toast("No 'key' file found next to the exe.", ToastKind::Warning),
+                        }
+                    }
+                    if ui.button("Clear key").clicked() {
+                        self.api_key.clear();
+                        self.toast("API key cleared.", ToastKind::Info);
+                    }
+                    ui.label(if self.api_key.is_empty() { "Not logged in" } else { "Key loaded" });
+                });
+                ui.add(egui::Slider::new(&mut self.threads, 1..=10).text("Threads"));
+                ui.checkbox(&mut self.random, "Random order");
+                ui.checkbox(&mut self.lower_quality, "Prefer lower quality");
+                ui.checkbox(&mut self.open_folder_after, "Open ./dl when finished");
+            });
+        ui.add_space(8.0);
+    }
 
-        let _ = dl_count_tx.send(0);
-        let _ = dl_status_tx.send(false);
-        let _ = finished_status_tx.send(true);
+    fn favourites_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Download Favourites");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Username");
+            ui.text_edit_singleline(&mut self.username);
+        });
+        ui.add_space(6.0);
+        tags_edit(ui, &mut self.tags);
+        ui.add_space(6.0);
+        ui.add(egui::Slider::new(&mut self.count, 1..=250).text("Posts per page"));
+        ui.add(egui::Slider::new(&mut self.pages, -1..=75).text("Pages (-1 = all)"));
+        ui.add_space(10.0);
+        self.shared_settings_ui(ui);
 
-        if open_dl_folder {
-            open_dl_dir();
+        let busy = self.job.is_some();
+        ui.add_enabled_ui(!busy && !self.username.trim().is_empty(), |ui| {
+            if ui.button("Download Favourites").clicked() {
+                self.start_job(JobKind::Favourites, "Favourites");
+            }
+        });
+        if busy {
+            self.stop_button(ui);
         }
-    });
+    }
 
-    working_thread.abort_handle()
+    fn tags_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Download by Tags");
+        ui.add_space(8.0);
+        tags_edit(ui, &mut self.tags);
+        ui.add_space(6.0);
+        ui.add(egui::Slider::new(&mut self.count, 1..=250).text("Posts per page"));
+        ui.add(egui::Slider::new(&mut self.pages, -1..=75).text("Pages (-1 = all)"));
+        ui.add_space(10.0);
+        self.shared_settings_ui(ui);
+
+        let busy = self.job.is_some();
+        ui.add_enabled_ui(!busy && !self.tags.trim().is_empty(), |ui| {
+            if ui.button("Download Posts").clicked() {
+                self.start_job(JobKind::Tags, "Tags");
+            }
+        });
+        if busy {
+            self.stop_button(ui);
+        }
+    }
+
+    fn pool_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Download a Pool");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Pool ID");
+            ui.text_edit_singleline(&mut self.pool_id);
+        });
+        ui.add_space(10.0);
+        self.shared_settings_ui(ui);
+
+        let pool_id: Option<u64> = self.pool_id.trim().parse().ok();
+        let busy = self.job.is_some();
+        ui.add_enabled_ui(!busy && pool_id.is_some(), |ui| {
+            if ui.button("Download Pool").clicked() {
+                if let Some(id) = pool_id {
+                    self.start_job(JobKind::Pool(id), "Pool");
+                }
+            }
+        });
+        if busy {
+            self.stop_button(ui);
+        }
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.label("Package the downloaded pool into an archive (files are numbered so reading order is preserved):");
+        ui.horizontal(|ui| {
+            ui.label("Archive name");
+            ui.text_edit_singleline(&mut self.zip_name);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Format");
+            egui::ComboBox::from_id_salt("zip_format")
+                .selected_text(archive_format_label(self.zip_format))
+                .show_ui(ui, |ui| {
+                    for fmt in [ArchiveFormat::Cbz, ArchiveFormat::Zip, ArchiveFormat::SevenZip] {
+                        ui.selectable_value(&mut self.zip_format, fmt, archive_format_label(fmt));
+                    }
+                });
+        });
+        ui.add_enabled_ui(self.zip_job.is_none() && !self.zip_name.trim().is_empty(), |ui| {
+            if ui.button("Package into archive").clicked() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                backend::spawn_zip(PathBuf::from(DL_DIR), self.zip_name.clone(), self.zip_format, tx);
+                self.zip_job = Some(ActiveZip { rx });
+                self.toast("Packaging archive (requires 7z on PATH)...", ToastKind::Info);
+            }
+        });
+        if self.zip_job.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Packaging...");
+            });
+        }
+    }
+
+    fn utilities_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Utilities");
+        ui.add_space(10.0);
+
+        if ui.button("Open ./dl folder").clicked() {
+            if Path::new(DL_DIR).exists() {
+                open_dl_dir();
+            } else {
+                self.toast("No ./dl folder found.", ToastKind::Error);
+            }
+        }
+
+        ui.add_space(6.0);
+        let cleanup_style = egui::Button::new("Cleanup (trash ./dl)").fill(Color32::from_rgb(125, 0, 0));
+        if ui.add(cleanup_style).clicked() {
+            if Path::new(DL_DIR).exists() {
+                let _ = trash::delete(DL_DIR);
+                self.toast("Cleaned up!", ToastKind::Info);
+            } else {
+                self.toast("No ./dl folder found.", ToastKind::Error);
+            }
+        }
+
+        ui.add_space(16.0);
+        ui.label(RichText::new("The API key is read from a plain-text file called 'key' next to the executable.").weak());
+    }
+
+    fn stop_button(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Stop").clicked() {
+            if let Some(job) = &self.job {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.toast("Stopping...", ToastKind::Warning);
+        }
+    }
+
+    fn progress_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(job) = &self.job else {
+            ui.label(RichText::new("Idle").weak());
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(format!("Downloading {}...", job.label));
+        });
+
+        match job.total {
+            Some(total) if total > 0 => {
+                let fraction = job.completed as f32 / total as f32;
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .text(format!("{}/{}", job.completed, total))
+                        .animate(true),
+                );
+            }
+            _ => {
+                ui.add(egui::ProgressBar::new(0.0).animate(true));
+            }
+        }
+    }
 }
 
-fn dl_tags_btn(
-    data: EHandler,
-    open_dl_folder: bool,
-    dl_count_tx: Sender<u64>,
-    dl_status_tx: Sender<bool>,
-    finished_status_tx: Sender<bool>,
-) -> AbortHandle {
-    let working_thread = tokio::spawn(async move {
-        let _ = dl_status_tx.send(true);
-
-        data.download_with_tags().await;
-
-        let _ = dl_count_tx.send(0);
-        let _ = dl_status_tx.send(false);
-        let _ = finished_status_tx.send(true);
-
-        if open_dl_folder {
-            open_dl_dir();
-        }
-    });
-
-    working_thread.abort_handle()
+fn tags_edit(ui: &mut egui::Ui, tags: &mut String) {
+    ui.label("Tags");
+    ui.add(egui::TextEdit::multiline(tags).desired_rows(2).char_limit(250));
 }
 
-fn dl_bulk_btn(
-    data: EHandler,
-    open_dl_folder: bool,
-    dl_count_tx: Sender<u64>,
-    dl_status_tx: Sender<bool>,
-    finished_status_tx: Sender<bool>,
-) -> AbortHandle {
-    let working_thread = tokio::spawn(async move {
-        let _ = dl_status_tx.send(true);
+fn archive_format_label(fmt: ArchiveFormat) -> &'static str {
+    match fmt {
+        ArchiveFormat::Zip => "zip",
+        ArchiveFormat::SevenZip => "7z",
+        ArchiveFormat::Cbz => "cbz",
+    }
+}
 
-        data.get_bulk_data().await;
-
-        let _ = dl_count_tx.send(0);
-        let _ = dl_status_tx.send(false);
-        let _ = finished_status_tx.send(true);
-
-        if open_dl_folder {
-            open_dl_dir();
-        }
-    });
-
-    working_thread.abort_handle()
+fn open_dl_dir() {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(DL_DIR.replace('/', "\\")).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(DL_DIR).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(DL_DIR).spawn();
 }
