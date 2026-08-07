@@ -1,12 +1,8 @@
 # E-Cli-GUI
 
-[![Build binaries](https://codeberg.org/Saniee/e-cli-gui/actions/workflows/build.yml/badge.svg)](https://codeberg.org/Saniee/e-cli-gui/actions/workflows/build.yml) <br>
+[![Build binaries](https://github.com/Saniee/e-cli-gui/actions/workflows/build.yml/badge.svg)](https://github.com/Saniee/e-cli-gui/actions/workflows/build.yml) <br>
 
-The Graphical Interface version of [E-Cli](https://codeberg.org/Saniee/e-cli) <br>
-~~Not as feature complete, but much easier to use.~~ <br>
-Now quite better then the CLI.
-
-Built directly on top of the [e-cli](https://codeberg.org/Saniee/e-cli) library, so it stays in sync with its downloading logic instead of reimplementing it.
+Built directly on top of [e-cli](https://codeberg.org/Saniee/e-cli).
 
 What it can do:
 
@@ -19,3 +15,8 @@ What it can do:
 
 # Usage
 ## Just run the .exe or the linux binary (without any extension).
+
+# Downloads
+Official builds are attached to [Releases](https://github.com/Saniee/e-cli-gui/releases) — grab `e-cli-gui-windows-x64` (the `.exe`) or `e-cli-gui-linux-x64` (the native binary).
+
+Nightly builds are produced by [GitHub Actions](https://github.com/Saniee/e-cli-gui/actions/workflows/build.yml) for Linux and Windows. Open the newest successful run, scroll to the **Artifacts** section, and download `e-cli-gui-windows-x64` or `e-cli-gui-linux-x64`.

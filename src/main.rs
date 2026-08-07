@@ -71,6 +71,8 @@ struct App {
     random: bool,
     lower_quality: bool,
     open_folder_after: bool,
+    track_file: String,
+    dl_dir: String,
 
     pool_id: String,
     zip_name: String,
@@ -96,6 +98,8 @@ impl Default for App {
             random: false,
             lower_quality: false,
             open_folder_after: false,
+            track_file: String::new(),
+            dl_dir: DL_DIR.to_string(),
             pool_id: String::new(),
             zip_name: String::new(),
             zip_format: ArchiveFormat::Cbz,
@@ -118,6 +122,7 @@ impl App {
             threads: self.threads,
             random: self.random,
             lower_quality: self.lower_quality,
+            track_file: self.track_file.clone(),
         }
     }
 
@@ -127,7 +132,7 @@ impl App {
         backend::spawn_download(
             kind,
             self.download_settings(),
-            PathBuf::from(DL_DIR),
+            PathBuf::from(&self.dl_dir),
             cancel.clone(),
             tx,
         );
@@ -156,8 +161,8 @@ impl App {
                 Progress::Finished(stats) => {
                     finished_msg = Some((
                         format!(
-                            "Finished! {} downloaded, {} failed (of {}).",
-                            stats.completed, stats.failed, stats.total
+                            "Finished! {} downloaded, {} skipped, {} failed (of {}).",
+                            stats.completed, stats.skipped, stats.failed, stats.total
                         ),
                         ToastKind::Success,
                     ));
@@ -174,7 +179,7 @@ impl App {
             let open_folder = self.open_folder_after;
             self.job = None;
             if open_folder {
-                open_dl_dir();
+                open_dl_dir(&self.dl_dir);
             }
         }
     }
@@ -265,10 +270,26 @@ impl App {
                     }
                     ui.label(if self.api_key.is_empty() { "Not logged in" } else { "Key loaded" });
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Track file");
+                    ui.text_edit_singleline(&mut self.track_file);
+                    ui.label(if self.track_file.trim().is_empty() {
+                        "off"
+                    } else {
+                        "on"
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Download dir");
+                    ui.text_edit_singleline(&mut self.dl_dir);
+                });
                 ui.add(egui::Slider::new(&mut self.threads, 1..=10).text("Threads"));
                 ui.checkbox(&mut self.random, "Random order");
                 ui.checkbox(&mut self.lower_quality, "Prefer lower quality");
-                ui.checkbox(&mut self.open_folder_after, "Open ./dl when finished");
+                ui.checkbox(
+                    &mut self.open_folder_after,
+                    format!("Open {} when finished", self.dl_dir),
+                );
             });
         ui.add_space(8.0);
     }
@@ -363,7 +384,7 @@ impl App {
         ui.add_enabled_ui(self.zip_job.is_none() && !self.zip_name.trim().is_empty(), |ui| {
             if ui.button("Package into archive").clicked() {
                 let (tx, rx) = std::sync::mpsc::channel();
-                backend::spawn_zip(PathBuf::from(DL_DIR), self.zip_name.clone(), self.zip_format, tx);
+                backend::spawn_zip(PathBuf::from(&self.dl_dir), self.zip_name.clone(), self.zip_format, tx);
                 self.zip_job = Some(ActiveZip { rx });
                 self.toast("Packaging archive (requires 7z on PATH)...", ToastKind::Info);
             }
@@ -380,22 +401,23 @@ impl App {
         ui.heading("Utilities");
         ui.add_space(10.0);
 
-        if ui.button("Open ./dl folder").clicked() {
-            if Path::new(DL_DIR).exists() {
-                open_dl_dir();
+        if ui.button(format!("Open {} folder", self.dl_dir)).clicked() {
+            if Path::new(&self.dl_dir).exists() {
+                open_dl_dir(&self.dl_dir);
             } else {
-                self.toast("No ./dl folder found.", ToastKind::Error);
+                self.toast(format!("No {} folder found.", self.dl_dir), ToastKind::Error);
             }
         }
 
         ui.add_space(6.0);
-        let cleanup_style = egui::Button::new("Cleanup (trash ./dl)").fill(Color32::from_rgb(125, 0, 0));
+        let cleanup_style = egui::Button::new(format!("Cleanup (trash {})", self.dl_dir))
+            .fill(Color32::from_rgb(125, 0, 0));
         if ui.add(cleanup_style).clicked() {
-            if Path::new(DL_DIR).exists() {
-                let _ = trash::delete(DL_DIR);
+            if Path::new(&self.dl_dir).exists() {
+                let _ = trash::delete(&self.dl_dir);
                 self.toast("Cleaned up!", ToastKind::Info);
             } else {
-                self.toast("No ./dl folder found.", ToastKind::Error);
+                self.toast(format!("No {} folder found.", self.dl_dir), ToastKind::Error);
             }
         }
 
@@ -451,11 +473,11 @@ fn archive_format_label(fmt: ArchiveFormat) -> &'static str {
     }
 }
 
-fn open_dl_dir() {
+fn open_dl_dir(dir: &str) {
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer").arg(DL_DIR.replace('/', "\\")).spawn();
+    let _ = std::process::Command::new("explorer").arg(dir.replace('/', "\\")).spawn();
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(DL_DIR).spawn();
+    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(DL_DIR).spawn();
+    let _ = std::process::Command::new("open").arg(dir).spawn();
 }

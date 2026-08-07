@@ -8,6 +8,6 @@ eframe = "0.33"
 egui = "0.33"
 egui-toast = "=0.19.1"
 trash = "5"
-e-cli = { git = "https://codeberg.org/Saniee/e-cli.git", branch = "master" }
+e-cli = { git = "https://github.com/Saniee/e-cli.git", tag = "v0.5.2" }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 rayon = "1.11"

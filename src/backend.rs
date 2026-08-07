@@ -11,7 +11,7 @@ use e_cli::cli::ArchiveFormat;
 use e_cli::commands::get_client;
 use e_cli::funcs::{self, get_pages, get_pool, get_post_data};
 use e_cli::type_defs::api_defs::Post;
-use e_cli::{CliContext, DownloadStatistics, Login};
+use e_cli::{CliContext, DownloadStatistics, Login, Tracker};
 
 #[derive(Clone)]
 pub struct DownloadSettings {
@@ -24,6 +24,7 @@ pub struct DownloadSettings {
     pub threads: usize,
     pub random: bool,
     pub lower_quality: bool,
+    pub track_file: String,
 }
 
 pub enum JobKind {
@@ -56,6 +57,8 @@ pub fn spawn_download(
     tx: Sender<Progress>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        funcs::ensure_dl_dir(&output_dir);
+
         let context = CliContext {
             verbose: false,
             api_source: settings.api_source.clone(),
@@ -66,6 +69,20 @@ pub fn spawn_download(
         let login = Login {
             username: settings.username.clone(),
             api_key: settings.api_key.clone(),
+        };
+        let tracker = if settings.track_file.trim().is_empty() {
+            None
+        } else {
+            match Tracker::load(std::path::Path::new(&settings.track_file)) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    let _ = tx.send(Progress::Error(format!(
+                        "Failed to open tracking file {}: {e}",
+                        settings.track_file
+                    )));
+                    return;
+                }
+            }
         };
         let client = get_client();
         let random_check = if settings.random { "order:random" } else { "" };
@@ -102,7 +119,7 @@ pub fn spawn_download(
                     let _ = tx.send(Progress::Error("Pool has no downloadable posts.".into()));
                     return;
                 }
-                run_indexed_download(posts, &client, &login, &context, &output_dir, &cancel, &tx);
+                run_indexed_download(posts, &client, &login, &context, &output_dir, &cancel, &tx, tracker.as_ref());
                 return;
             }
         };
@@ -112,13 +129,12 @@ pub fn spawn_download(
             return;
         }
 
-        funcs::create_dl_dir(&output_dir);
-
         let total: usize = pages.iter().map(|p| p.len()).sum();
         let _ = tx.send(Progress::Total(total as u64));
 
         let mut completed: i64 = 0;
         let mut failed: i64 = 0;
+        let mut skipped: i64 = 0;
         let mut downloaded_amount = 0.0;
 
         let pool = rayon_pool(context.num_threads);
@@ -128,17 +144,19 @@ pub fn spawn_download(
                 break;
             }
 
-            let (page_finished, page_failed, page_bytes) =
-                download_posts_parallel(&pool, &client, &login, &context, &output_dir, posts, &cancel, &tx);
+            let (page_finished, page_failed, page_skipped, page_bytes) =
+                download_posts_parallel(&pool, &client, &login, &context, &output_dir, posts, &cancel, &tx, tracker.as_ref());
 
             completed += page_finished;
             failed += page_failed;
+            skipped += page_skipped;
             downloaded_amount += page_bytes;
         }
 
         let _ = tx.send(Progress::Finished(DownloadStatistics {
             completed,
             failed,
+            skipped,
             total,
             downloaded_amount,
         }));
@@ -153,8 +171,9 @@ fn run_indexed_download(
     output_dir: &std::path::Path,
     cancel: &Arc<AtomicBool>,
     tx: &Sender<Progress>,
+    tracker: Option<&Tracker>,
 ) {
-    funcs::create_dl_dir(output_dir);
+    funcs::ensure_dl_dir(output_dir);
 
     let total = posts.len();
     let _ = tx.send(Progress::Total(total as u64));
@@ -164,6 +183,7 @@ fn run_indexed_download(
 
     let mut completed: i64 = 0;
     let mut failed: i64 = 0;
+    let mut skipped: i64 = 0;
     let mut downloaded_amount = 0.0;
 
     if !cancel.load(Ordering::Relaxed) {
@@ -184,6 +204,7 @@ fn run_indexed_download(
                         Some(&index),
                         &lower_quality,
                         output_dir,
+                        tracker,
                     );
                     let _ = progress_tx.send(Progress::Tick);
                     let _ = chunk_tx.send(result);
@@ -193,6 +214,7 @@ fn run_indexed_download(
         for result in rx_chunk {
             completed += result.amount_finished;
             failed += result.amount_failed;
+            skipped += result.amount_skipped;
             downloaded_amount += result.amount;
         }
     }
@@ -200,6 +222,7 @@ fn run_indexed_download(
     let _ = tx.send(Progress::Finished(DownloadStatistics {
         completed,
         failed,
+        skipped,
         total,
         downloaded_amount,
     }));
@@ -222,7 +245,8 @@ fn download_posts_parallel(
     posts: Vec<Post>,
     cancel: &Arc<AtomicBool>,
     tx: &Sender<Progress>,
-) -> (i64, i64, f64) {
+    tracker: Option<&Tracker>,
+) -> (i64, i64, i64, f64) {
     use rayon::prelude::*;
 
     let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
@@ -235,7 +259,7 @@ fn download_posts_parallel(
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let result = funcs::download(client, login, vec![post], None, &lower_quality, output_dir);
+                let result = funcs::download(client, login, vec![post], None, &lower_quality, output_dir, tracker);
                 let _ = progress_tx.send(Progress::Tick);
                 let _ = result_tx.send(result);
             },
@@ -244,13 +268,15 @@ fn download_posts_parallel(
 
     let mut finished = 0;
     let mut failed = 0;
+    let mut skipped = 0;
     let mut amount = 0.0;
     for result in chunk_rx {
         finished += result.amount_finished;
         failed += result.amount_failed;
+        skipped += result.amount_skipped;
         amount += result.amount;
     }
-    (finished, failed, amount)
+    (finished, failed, skipped, amount)
 }
 
 /// Packages `dir` into an archive on its own thread (shells out to `7z`).
