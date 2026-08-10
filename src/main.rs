@@ -10,6 +10,7 @@ use std::sync::Arc;
 use backend::{DownloadSettings, JobKind, Progress, ZipEvent};
 use e_cli::cli::ArchiveFormat;
 use e_cli::config as econfig;
+use e_cli::update;
 use eframe::egui;
 use egui::{Align2, Color32, RichText};
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
@@ -32,6 +33,7 @@ fn main() -> eframe::Result<()> {
             egui_extras_setup(&cc.egui_ctx);
             let mut app = App::default();
             app.load_settings();
+            app.spawn_version_check(cc.egui_ctx.clone());
             Ok(Box::new(app))
         }),
     )
@@ -90,6 +92,8 @@ struct App {
     job: Option<ActiveJob>,
     zip_job: Option<ActiveZip>,
 
+    version_check_rx: Option<Receiver<Result<Option<String>, String>>>,
+
     pending_toasts: Vec<(String, ToastKind)>,
 }
 
@@ -118,6 +122,7 @@ impl Default for App {
             config: econfig::Config::default(),
             job: None,
             zip_job: None,
+            version_check_rx: None,
             pending_toasts: Vec::new(),
         }
     }
@@ -163,6 +168,38 @@ impl App {
 
     fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
         self.pending_toasts.push((text.into(), kind));
+    }
+
+    fn spawn_version_check(&mut self, ctx: egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                update::check_update("Saniee/e-cli-gui", env!("CARGO_PKG_VERSION"));
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.version_check_rx = Some(rx);
+    }
+
+    fn poll_version_check(&mut self) {
+        let Some(rx) = self.version_check_rx.take() else { return };
+        match rx.try_recv() {
+            Ok(result) => match result {
+                Ok(Some(latest)) => self.toast(
+                    format!(
+                        "New version v{latest} available! See \
+                         https://github.com/Saniee/e-cli-gui/releases/tag/v{latest}",
+                    ),
+                    ToastKind::Info,
+                ),
+                Ok(None) => {}
+                Err(e) => self.toast(
+                    format!("Could not check for updates: {e}"),
+                    ToastKind::Warning,
+                ),
+            },
+            Err(_) => self.version_check_rx = Some(rx),
+        }
     }
 
     fn load_settings(&mut self) {
@@ -409,6 +446,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job(ctx);
         self.poll_zip();
+        self.poll_version_check();
 
         let mut toasts = Toasts::new()
             .anchor(Align2::CENTER_BOTTOM, (0.0, -8.0))
