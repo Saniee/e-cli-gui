@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use backend::{DownloadSettings, JobKind, Progress, ZipEvent};
 use e_cli::cli::ArchiveFormat;
+use e_cli::config as econfig;
 use eframe::egui;
 use egui::{Align2, Color32, RichText};
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
@@ -29,7 +30,9 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             egui_extras_setup(&cc.egui_ctx);
-            Ok(Box::<App>::default())
+            let mut app = App::default();
+            app.load_settings();
+            Ok(Box::new(app))
         }),
     )
 }
@@ -44,6 +47,7 @@ enum Tab {
     Tags,
     Pool,
     Utilities,
+    Config,
 }
 
 struct ActiveJob {
@@ -61,14 +65,17 @@ struct ActiveZip {
 struct App {
     tab: Tab,
 
-    api_source: String,
+    nsfw: bool,
     username: String,
     api_key: String,
-    tags: String,
-    count: u32,
+    fav_tags: String,
+    fav_count: u32,
+    fav_random: bool,
+    search_tags: String,
+    search_count: u32,
+    search_random: bool,
     pages: i64,
     threads: usize,
-    random: bool,
     lower_quality: bool,
     open_folder_after: bool,
     track_file: String,
@@ -77,6 +84,8 @@ struct App {
     pool_id: String,
     zip_name: String,
     zip_format: ArchiveFormat,
+
+    config: econfig::Config,
 
     job: Option<ActiveJob>,
     zip_job: Option<ActiveZip>,
@@ -88,14 +97,17 @@ impl Default for App {
     fn default() -> Self {
         Self {
             tab: Tab::Favourites,
-            api_source: "e926.net".to_string(),
+            nsfw: false,
             username: String::new(),
             api_key: String::new(),
-            tags: String::new(),
-            count: 75,
+            fav_tags: String::new(),
+            fav_count: 75,
+            fav_random: false,
+            search_tags: String::new(),
+            search_count: 75,
+            search_random: false,
             pages: -1,
             threads: 5,
-            random: false,
             lower_quality: false,
             open_folder_after: false,
             track_file: String::new(),
@@ -103,6 +115,7 @@ impl Default for App {
             pool_id: String::new(),
             zip_name: String::new(),
             zip_format: ArchiveFormat::Cbz,
+            config: econfig::Config::default(),
             job: None,
             zip_job: None,
             pending_toasts: Vec::new(),
@@ -111,27 +124,29 @@ impl Default for App {
 }
 
 impl App {
-    fn download_settings(&self) -> DownloadSettings {
-        DownloadSettings {
-            api_source: self.api_source.clone(),
-            username: self.username.clone(),
-            api_key: self.api_key.clone(),
-            tags: self.tags.clone(),
-            count: self.count,
-            pages: self.pages,
-            threads: self.threads,
-            random: self.random,
-            lower_quality: self.lower_quality,
-            track_file: self.track_file.clone(),
-        }
-    }
-
     fn start_job(&mut self, kind: JobKind, label: &'static str) {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let (tags, count, random) = match &kind {
+            JobKind::Favourites => (self.fav_tags.clone(), self.fav_count, self.fav_random),
+            JobKind::Tags => (self.search_tags.clone(), self.search_count, self.search_random),
+            JobKind::Pool(_) => (String::new(), 0, false),
+        };
+        let settings = DownloadSettings {
+            nsfw: self.nsfw,
+            username: self.username.clone(),
+            api_key: self.api_key.clone(),
+            tags,
+            count,
+            pages: self.pages,
+            threads: self.threads,
+            random,
+            lower_quality: self.lower_quality,
+            track_file: self.track_file.clone(),
+        };
         backend::spawn_download(
             kind,
-            self.download_settings(),
+            settings,
             PathBuf::from(&self.dl_dir),
             cancel.clone(),
             tx,
@@ -148,6 +163,199 @@ impl App {
 
     fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
         self.pending_toasts.push((text.into(), kind));
+    }
+
+    fn load_settings(&mut self) {
+        let cfg = match econfig::path().and_then(|p| econfig::load(&p)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.toast(format!("Could not load config: {e}"), ToastKind::Warning);
+                return;
+            }
+        };
+        self.apply_config(&cfg);
+        self.config = cfg;
+    }
+
+    fn apply_config(&mut self, cfg: &econfig::Config) {
+        if let Some(v) = cfg.global.nsfw {
+            self.nsfw = v;
+        }
+        if let Some(v) = cfg.global.pages {
+            self.pages = v;
+        }
+        if let Some(v) = cfg.global.num_threads {
+            self.threads = v;
+        }
+        if let Some(v) = cfg.global.lower_quality {
+            self.lower_quality = v;
+        }
+        if let Some(v) = cfg.global.dir.as_deref() {
+            self.dl_dir = v.to_owned();
+        }
+        if let Some(v) = cfg.global.track_file.as_deref() {
+            self.track_file = v.to_string_lossy().to_string();
+        }
+        if let Some(v) = cfg.d_favs.username.as_deref() {
+            self.username = v.to_owned();
+        }
+        if let Some(v) = cfg.d_favs.tags.as_deref() {
+            self.fav_tags = v.to_owned();
+        }
+        if let Some(v) = cfg.d_favs.count {
+            self.fav_count = v;
+        }
+        if let Some(v) = cfg.d_favs.random {
+            self.fav_random = v;
+        }
+        if let Some(v) = cfg.d_tags.tags.as_deref() {
+            self.search_tags = v.to_owned();
+        }
+        if let Some(v) = cfg.d_tags.count {
+            self.search_count = v;
+        }
+        if let Some(v) = cfg.d_tags.random {
+            self.search_random = v;
+        }
+        if let Some(v) = cfg.d_pool.pool_id {
+            self.pool_id = v.to_string();
+        }
+        if let Some(v) = cfg.zip.name.as_deref() {
+            self.zip_name = v.to_owned();
+        }
+        if let Some(v) = cfg.zip.format.as_deref() {
+            self.zip_format = match v {
+                "zip" => ArchiveFormat::Zip,
+                "7z" => ArchiveFormat::SevenZip,
+                _ => ArchiveFormat::Cbz,
+            };
+        }
+    }
+
+    fn finish_save(&mut self, changed: bool) {
+        if !changed {
+            self.toast("No changes to save.", ToastKind::Info);
+            return;
+        }
+        match econfig::save(&self.config) {
+            Ok(()) => self.toast("Settings saved to config.toml.", ToastKind::Success),
+            Err(e) => self.toast(format!("Could not save config: {e}"), ToastKind::Error),
+        }
+    }
+
+    fn save_global(&mut self) {
+        let cfg = &mut self.config;
+        let mut changed = false;
+        if Some(self.nsfw) != cfg.global.nsfw {
+            cfg.global.nsfw = Some(self.nsfw);
+            changed = true;
+        }
+        if Some(self.pages) != cfg.global.pages {
+            cfg.global.pages = Some(self.pages);
+            changed = true;
+        }
+        if Some(self.threads) != cfg.global.num_threads {
+            cfg.global.num_threads = Some(self.threads);
+            changed = true;
+        }
+        if Some(self.lower_quality) != cfg.global.lower_quality {
+            cfg.global.lower_quality = Some(self.lower_quality);
+            changed = true;
+        }
+        if Some(self.dl_dir.clone()) != cfg.global.dir {
+            cfg.global.dir = Some(self.dl_dir.clone());
+            changed = true;
+        }
+        let track = if self.track_file.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(self.track_file.trim()))
+        };
+        if track != cfg.global.track_file {
+            cfg.global.track_file = track;
+            changed = true;
+        }
+        self.finish_save(changed);
+    }
+
+    fn save_favourites(&mut self) {
+        let cfg = &mut self.config;
+        let mut changed = false;
+        let username = if self.username.trim().is_empty() {
+            None
+        } else {
+            Some(self.username.trim().to_owned())
+        };
+        if username != cfg.d_favs.username {
+            cfg.d_favs.username = username;
+            changed = true;
+        }
+        if Some(self.fav_tags.clone()) != cfg.d_favs.tags {
+            cfg.d_favs.tags = Some(self.fav_tags.clone());
+            changed = true;
+        }
+        if Some(self.fav_count) != cfg.d_favs.count {
+            cfg.d_favs.count = Some(self.fav_count);
+            changed = true;
+        }
+        if Some(self.fav_random) != cfg.d_favs.random {
+            cfg.d_favs.random = Some(self.fav_random);
+            changed = true;
+        }
+        self.finish_save(changed);
+    }
+
+    fn save_tags(&mut self) {
+        let cfg = &mut self.config;
+        let mut changed = false;
+        if Some(self.search_tags.clone()) != cfg.d_tags.tags {
+            cfg.d_tags.tags = Some(self.search_tags.clone());
+            changed = true;
+        }
+        if Some(self.search_count) != cfg.d_tags.count {
+            cfg.d_tags.count = Some(self.search_count);
+            changed = true;
+        }
+        if Some(self.search_random) != cfg.d_tags.random {
+            cfg.d_tags.random = Some(self.search_random);
+            changed = true;
+        }
+        self.finish_save(changed);
+    }
+
+    fn save_pool(&mut self) {
+        let cfg = &mut self.config;
+        let mut changed = false;
+        let pool_id = self.pool_id.trim().parse().ok();
+        if pool_id != cfg.d_pool.pool_id {
+            cfg.d_pool.pool_id = pool_id;
+            changed = true;
+        }
+        let name = if self.zip_name.trim().is_empty() {
+            None
+        } else {
+            Some(self.zip_name.trim().to_owned())
+        };
+        if name != cfg.zip.name {
+            cfg.zip.name = name;
+            changed = true;
+        }
+        let format = Some(match self.zip_format {
+            ArchiveFormat::Zip => "zip".to_owned(),
+            ArchiveFormat::SevenZip => "7z".to_owned(),
+            ArchiveFormat::Cbz => "cbz".to_owned(),
+        });
+        if format != cfg.zip.format {
+            cfg.zip.format = format;
+            changed = true;
+        }
+        self.finish_save(changed);
+    }
+
+    fn open_config(&mut self) {
+        if let Err(e) = econfig::open() {
+            self.toast(format!("Could not open config: {e}"), ToastKind::Error);
+        }
     }
 
     fn poll_job(&mut self, ctx: &egui::Context) {
@@ -224,6 +432,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Tags, "Tags");
                 ui.selectable_value(&mut self.tab, Tab::Pool, "Pool");
                 ui.selectable_value(&mut self.tab, Tab::Utilities, "Utilities");
+                ui.selectable_value(&mut self.tab, Tab::Config, "Config");
             });
             ui.add_space(4.0);
         });
@@ -239,6 +448,7 @@ impl eframe::App for App {
             Tab::Tags => self.tags_ui(ui),
             Tab::Pool => self.pool_ui(ui),
             Tab::Utilities => self.utilities_ui(ui),
+            Tab::Config => self.config_ui(ui),
         });
 
         toasts.show(ctx);
@@ -246,13 +456,17 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn shared_settings_ui(&mut self, ui: &mut egui::Ui) {
+    fn config_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Global settings");
+        ui.add_space(8.0);
         egui::CollapsingHeader::new("Connection settings")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("API source");
-                    ui.text_edit_singleline(&mut self.api_source);
+                    ui.checkbox(&mut self.nsfw, "NSFW API");
+                    ui.label(
+                        RichText::new(if self.nsfw { "e621.net" } else { "e926.net" }).weak(),
+                    );
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Load API key").clicked() {
@@ -284,13 +498,32 @@ impl App {
                     ui.text_edit_singleline(&mut self.dl_dir);
                 });
                 ui.add(egui::Slider::new(&mut self.threads, 1..=10).text("Threads"));
-                ui.checkbox(&mut self.random, "Random order");
+                ui.add(egui::Slider::new(&mut self.pages, -1..=75).text("Pages (-1 = all)"));
                 ui.checkbox(&mut self.lower_quality, "Prefer lower quality");
                 ui.checkbox(
                     &mut self.open_folder_after,
                     format!("Open {} when finished", self.dl_dir),
                 );
+                ui.horizontal(|ui| {
+                    if ui.button("Save settings").clicked() {
+                        self.save_global();
+                    }
+                });
             });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Open config").clicked() {
+                self.open_config();
+            }
+            ui.label(
+                RichText::new(
+                    econfig::path()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| "config location unavailable".to_owned()),
+                )
+                .weak(),
+            );
+        });
         ui.add_space(8.0);
     }
 
@@ -302,12 +535,15 @@ impl App {
             ui.text_edit_singleline(&mut self.username);
         });
         ui.add_space(6.0);
-        tags_edit(ui, &mut self.tags);
+        tags_edit(ui, &mut self.fav_tags);
         ui.add_space(6.0);
-        ui.add(egui::Slider::new(&mut self.count, 1..=250).text("Posts per page"));
-        ui.add(egui::Slider::new(&mut self.pages, -1..=75).text("Pages (-1 = all)"));
+        ui.add(egui::Slider::new(&mut self.fav_count, 1..=250).text("Posts per page"));
+        ui.checkbox(&mut self.fav_random, "Random order");
         ui.add_space(10.0);
-        self.shared_settings_ui(ui);
+
+        if ui.button("Save settings").clicked() {
+            self.save_favourites();
+        }
 
         let busy = self.job.is_some();
         ui.add_enabled_ui(!busy && !self.username.trim().is_empty(), |ui| {
@@ -323,15 +559,18 @@ impl App {
     fn tags_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Download by Tags");
         ui.add_space(8.0);
-        tags_edit(ui, &mut self.tags);
+        tags_edit(ui, &mut self.search_tags);
         ui.add_space(6.0);
-        ui.add(egui::Slider::new(&mut self.count, 1..=250).text("Posts per page"));
-        ui.add(egui::Slider::new(&mut self.pages, -1..=75).text("Pages (-1 = all)"));
+        ui.add(egui::Slider::new(&mut self.search_count, 1..=250).text("Posts per page"));
+        ui.checkbox(&mut self.search_random, "Random order");
         ui.add_space(10.0);
-        self.shared_settings_ui(ui);
+
+        if ui.button("Save settings").clicked() {
+            self.save_tags();
+        }
 
         let busy = self.job.is_some();
-        ui.add_enabled_ui(!busy && !self.tags.trim().is_empty(), |ui| {
+        ui.add_enabled_ui(!busy && !self.search_tags.trim().is_empty(), |ui| {
             if ui.button("Download Posts").clicked() {
                 self.start_job(JobKind::Tags, "Tags");
             }
@@ -349,7 +588,10 @@ impl App {
             ui.text_edit_singleline(&mut self.pool_id);
         });
         ui.add_space(10.0);
-        self.shared_settings_ui(ui);
+
+        if ui.button("Save settings").clicked() {
+            self.save_pool();
+        }
 
         let pool_id: Option<u64> = self.pool_id.trim().parse().ok();
         let busy = self.job.is_some();

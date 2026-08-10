@@ -15,7 +15,7 @@ use e_cli::{CliContext, DownloadStatistics, Login, Tracker};
 
 #[derive(Clone)]
 pub struct DownloadSettings {
-    pub api_source: String,
+    pub nsfw: bool,
     pub username: String,
     pub api_key: String,
     pub tags: String,
@@ -61,7 +61,7 @@ pub fn spawn_download(
 
         let context = CliContext {
             verbose: false,
-            api_source: settings.api_source.clone(),
+            nsfw: settings.nsfw,
             lower_quality: settings.lower_quality,
             pages: settings.pages,
             num_threads: settings.threads.clamp(1, 10),
