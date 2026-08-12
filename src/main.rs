@@ -52,12 +52,30 @@ enum Tab {
     Config,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresetSource {
+    Tags,
+    Favourites,
+    Pool,
+}
+
+impl PresetSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tags => "Tags",
+            Self::Favourites => "Favourites",
+            Self::Pool => "Pool",
+        }
+    }
+}
+
 struct ActiveJob {
     label: &'static str,
     cancel: Arc<AtomicBool>,
     rx: Receiver<Progress>,
     completed: u64,
     total: Option<u64>,
+    stopping: bool,
 }
 
 struct ActiveZip {
@@ -82,6 +100,13 @@ struct App {
     open_folder_after: bool,
     track_file: String,
     dl_dir: String,
+    retries: u32,
+    dry_run: bool,
+    manifest_path: String,
+    duplicate_index: String,
+    failure_manifest: String,
+    preset_name: String,
+    preset_source: PresetSource,
 
     pool_id: String,
     zip_name: String,
@@ -116,6 +141,13 @@ impl Default for App {
             open_folder_after: false,
             track_file: String::new(),
             dl_dir: DL_DIR.to_string(),
+            retries: 3,
+            dry_run: false,
+            manifest_path: String::new(),
+            duplicate_index: String::new(),
+            failure_manifest: String::new(),
+            preset_name: String::new(),
+            preset_source: PresetSource::Tags,
             pool_id: String::new(),
             zip_name: String::new(),
             zip_format: ArchiveFormat::Cbz,
@@ -134,8 +166,13 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tags, count, random) = match &kind {
             JobKind::Favourites => (self.fav_tags.clone(), self.fav_count, self.fav_random),
-            JobKind::Tags => (self.search_tags.clone(), self.search_count, self.search_random),
+            JobKind::Tags => (
+                self.search_tags.clone(),
+                self.search_count,
+                self.search_random,
+            ),
             JobKind::Pool(_) => (String::new(), 0, false),
+            JobKind::RetryFailed => (String::new(), 0, false),
         };
         let settings = DownloadSettings {
             nsfw: self.nsfw,
@@ -148,6 +185,11 @@ impl App {
             random,
             lower_quality: self.lower_quality,
             track_file: self.track_file.clone(),
+            retries: self.retries,
+            duplicate_index: self.duplicate_index.clone(),
+            dry_run: self.dry_run,
+            manifest_path: self.manifest_path.clone(),
+            failure_manifest: self.failure_manifest.clone(),
         };
         backend::spawn_download(
             kind,
@@ -162,6 +204,7 @@ impl App {
             rx,
             completed: 0,
             total: None,
+            stopping: false,
         });
         self.toast(format!("Starting {label} download..."), ToastKind::Info);
     }
@@ -173,8 +216,7 @@ impl App {
     fn spawn_version_check(&mut self, ctx: egui::Context) {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result =
-                update::check_update("Saniee/e-cli-gui", env!("CARGO_PKG_VERSION"));
+            let result = update::check_update("Saniee/e-cli-gui", env!("CARGO_PKG_VERSION"));
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -182,7 +224,9 @@ impl App {
     }
 
     fn poll_version_check(&mut self) {
-        let Some(rx) = self.version_check_rx.take() else { return };
+        let Some(rx) = self.version_check_rx.take() else {
+            return;
+        };
         match rx.try_recv() {
             Ok(result) => match result {
                 Ok(Some(latest)) => self.toast(
@@ -389,6 +433,100 @@ impl App {
         self.finish_save(changed);
     }
 
+    fn load_preset(&mut self) {
+        let Some(preset) = self.config.presets.get(&self.preset_name).cloned() else {
+            self.toast("Select a saved preset first.", ToastKind::Warning);
+            return;
+        };
+        self.preset_source = match preset.source.as_deref() {
+            Some("favourites") => PresetSource::Favourites,
+            Some("pool") => PresetSource::Pool,
+            _ => PresetSource::Tags,
+        };
+        match self.preset_source {
+            PresetSource::Tags => {
+                if let Some(tags) = preset.tags {
+                    self.search_tags = tags;
+                }
+            }
+            PresetSource::Favourites => {
+                if let Some(username) = preset.username {
+                    self.username = username;
+                }
+                if let Some(tags) = preset.fav_tags {
+                    self.fav_tags = tags;
+                }
+            }
+            PresetSource::Pool => {
+                if let Some(pool_id) = preset.pool_id {
+                    self.pool_id = pool_id.to_string();
+                }
+            }
+        }
+        if let Some(count) = preset.count {
+            match self.preset_source {
+                PresetSource::Favourites => self.fav_count = count,
+                _ => self.search_count = count,
+            }
+        }
+        if let Some(pages) = preset.pages {
+            self.pages = pages;
+        }
+        if let Some(lower_quality) = preset.lower_quality {
+            self.lower_quality = lower_quality;
+        }
+        if let Some(nsfw) = preset.nsfw {
+            self.nsfw = nsfw;
+        }
+        if let Some(dir) = preset.dir {
+            self.dl_dir = dir;
+        }
+        self.toast(
+            format!("Loaded preset '{}'.", self.preset_name),
+            ToastKind::Success,
+        );
+    }
+
+    fn save_preset(&mut self) {
+        if self.preset_name.trim().is_empty() {
+            self.toast("Enter a preset name first.", ToastKind::Warning);
+            return;
+        }
+        let (tags, fav_tags, username, pool_id) = match self.preset_source {
+            PresetSource::Tags => (Some(self.search_tags.clone()), None, None, None),
+            PresetSource::Favourites => (
+                None,
+                Some(self.fav_tags.clone()),
+                Some(self.username.clone()),
+                None,
+            ),
+            PresetSource::Pool => (None, None, None, self.pool_id.trim().parse().ok()),
+        };
+        self.config.presets.insert(
+            self.preset_name.trim().to_owned(),
+            econfig::PresetConfig {
+                source: Some(self.preset_source.label().to_lowercase()),
+                tags,
+                fav_tags,
+                username,
+                pool_id,
+                count: Some(match self.preset_source {
+                    PresetSource::Favourites => self.fav_count,
+                    _ => self.search_count,
+                }),
+                pages: Some(self.pages),
+                lower_quality: Some(self.lower_quality),
+                nsfw: Some(self.nsfw),
+                dir: Some(self.dl_dir.clone()),
+                ..Default::default()
+            },
+        );
+        match econfig::save(&self.config) {
+            Ok(()) => self.toast("Preset saved to config.toml.", ToastKind::Success),
+            Err(error) => self.toast(format!("Could not save preset: {error}"), ToastKind::Error),
+        }
+    }
+
     fn open_config(&mut self) {
         if let Err(e) = econfig::open() {
             self.toast(format!("Could not open config: {e}"), ToastKind::Error);
@@ -411,6 +549,9 @@ impl App {
                         ),
                         ToastKind::Success,
                     ));
+                }
+                Progress::Cancelled => {
+                    finished_msg = Some(("Download cancelled.".to_owned(), ToastKind::Info));
                 }
                 Progress::Error(err) => {
                     finished_msg = Some((err, ToastKind::Error));
@@ -502,9 +643,7 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.nsfw, "NSFW API");
-                    ui.label(
-                        RichText::new(if self.nsfw { "e621.net" } else { "e926.net" }).weak(),
-                    );
+                    ui.label(RichText::new(if self.nsfw { "e621.net" } else { "e926.net" }).weak());
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Load API key").clicked() {
@@ -513,14 +652,19 @@ impl App {
                                 self.api_key = key.trim().to_string();
                                 self.toast("API key loaded!", ToastKind::Success);
                             }
-                            _ => self.toast("No 'key' file found next to the exe.", ToastKind::Warning),
+                            _ => self
+                                .toast("No 'key' file found next to the exe.", ToastKind::Warning),
                         }
                     }
                     if ui.button("Clear key").clicked() {
                         self.api_key.clear();
                         self.toast("API key cleared.", ToastKind::Info);
                     }
-                    ui.label(if self.api_key.is_empty() { "Not logged in" } else { "Key loaded" });
+                    ui.label(if self.api_key.is_empty() {
+                        "Not logged in"
+                    } else {
+                        "Key loaded"
+                    });
                 });
                 ui.horizontal(|ui| {
                     ui.label("Track file");
@@ -537,7 +681,24 @@ impl App {
                 });
                 ui.add(egui::Slider::new(&mut self.threads, 1..=10).text("Threads"));
                 ui.add(egui::Slider::new(&mut self.pages, -1..=75).text("Pages (-1 = all)"));
+                ui.add(egui::Slider::new(&mut self.retries, 0..=10).text("Retries"));
                 ui.checkbox(&mut self.lower_quality, "Prefer lower quality");
+                ui.checkbox(
+                    &mut self.dry_run,
+                    "Dry run (no files or local state written)",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Manifest");
+                    ui.text_edit_singleline(&mut self.manifest_path);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Duplicate index");
+                    ui.text_edit_singleline(&mut self.duplicate_index);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Failure manifest");
+                    ui.text_edit_singleline(&mut self.failure_manifest);
+                });
                 ui.checkbox(
                     &mut self.open_folder_after,
                     format!("Open {} when finished", self.dl_dir),
@@ -547,6 +708,59 @@ impl App {
                         self.save_global();
                     }
                 });
+                ui.separator();
+                ui.label("Presets");
+                ui.label(
+                    RichText::new(
+                        "Create: configure the matching download tab, choose its category, enter a name, then save. Load applies the preset back to that tab.",
+                    )
+                    .weak(),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut self.preset_name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Category");
+                    egui::ComboBox::from_id_salt("preset_source")
+                        .selected_text(self.preset_source.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.preset_source,
+                                PresetSource::Tags,
+                                "Tags",
+                            );
+                            ui.selectable_value(
+                                &mut self.preset_source,
+                                PresetSource::Favourites,
+                                "Favourites",
+                            );
+                            ui.selectable_value(
+                                &mut self.preset_source,
+                                PresetSource::Pool,
+                                "Pool",
+                            );
+                        });
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Load preset").clicked() {
+                        self.load_preset();
+                    }
+                    if ui.button("Save preset").clicked() {
+                        self.save_preset();
+                    }
+                });
+                egui::ComboBox::from_id_salt("preset_list")
+                    .selected_text(if self.preset_name.is_empty() {
+                        "Choose a preset"
+                    } else {
+                        &self.preset_name
+                    })
+                    .show_ui(ui, |ui| {
+                        for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
+                            ui.selectable_value(&mut self.preset_name, name.clone(), name);
+                        }
+                    });
             });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -656,19 +870,34 @@ impl App {
             egui::ComboBox::from_id_salt("zip_format")
                 .selected_text(archive_format_label(self.zip_format))
                 .show_ui(ui, |ui| {
-                    for fmt in [ArchiveFormat::Cbz, ArchiveFormat::Zip, ArchiveFormat::SevenZip] {
+                    for fmt in [
+                        ArchiveFormat::Cbz,
+                        ArchiveFormat::Zip,
+                        ArchiveFormat::SevenZip,
+                    ] {
                         ui.selectable_value(&mut self.zip_format, fmt, archive_format_label(fmt));
                     }
                 });
         });
-        ui.add_enabled_ui(self.zip_job.is_none() && !self.zip_name.trim().is_empty(), |ui| {
-            if ui.button("Package into archive").clicked() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                backend::spawn_zip(PathBuf::from(&self.dl_dir), self.zip_name.clone(), self.zip_format, tx);
-                self.zip_job = Some(ActiveZip { rx });
-                self.toast("Packaging archive (requires 7z on PATH)...", ToastKind::Info);
-            }
-        });
+        ui.add_enabled_ui(
+            self.zip_job.is_none() && !self.zip_name.trim().is_empty(),
+            |ui| {
+                if ui.button("Package into archive").clicked() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    backend::spawn_zip(
+                        PathBuf::from(&self.dl_dir),
+                        self.zip_name.clone(),
+                        self.zip_format,
+                        tx,
+                    );
+                    self.zip_job = Some(ActiveZip { rx });
+                    self.toast(
+                        "Packaging archive (requires 7z on PATH)...",
+                        ToastKind::Info,
+                    );
+                }
+            },
+        );
         if self.zip_job.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -685,7 +914,10 @@ impl App {
             if Path::new(&self.dl_dir).exists() {
                 open_dl_dir(&self.dl_dir);
             } else {
-                self.toast(format!("No {} folder found.", self.dl_dir), ToastKind::Error);
+                self.toast(
+                    format!("No {} folder found.", self.dl_dir),
+                    ToastKind::Error,
+                );
             }
         }
 
@@ -697,20 +929,44 @@ impl App {
                 let _ = trash::delete(&self.dl_dir);
                 self.toast("Cleaned up!", ToastKind::Info);
             } else {
-                self.toast(format!("No {} folder found.", self.dl_dir), ToastKind::Error);
+                self.toast(
+                    format!("No {} folder found.", self.dl_dir),
+                    ToastKind::Error,
+                );
             }
         }
 
+        ui.add_space(8.0);
+        ui.add_enabled_ui(self.job.is_none(), |ui| {
+            if ui.button("Retry failed downloads").clicked() {
+                self.start_job(JobKind::RetryFailed, "Retry failed");
+            }
+        });
+
         ui.add_space(16.0);
-        ui.label(RichText::new("The API key is read from a plain-text file called 'key' next to the executable.").weak());
+        ui.label(
+            RichText::new(
+                "The API key is read from a plain-text file called 'key' next to the executable.",
+            )
+            .weak(),
+        );
     }
 
     fn stop_button(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Stop").clicked() {
+        let stopping = self.job.as_ref().is_some_and(|job| job.stopping);
+        if stopping {
+            ui.add_enabled(false, egui::Button::new("Stopping..."));
+        } else if ui.button("Stop").clicked() {
             if let Some(job) = &self.job {
                 job.cancel.store(true, Ordering::Relaxed);
             }
-            self.toast("Stopping...", ToastKind::Warning);
+            if let Some(job) = &mut self.job {
+                job.stopping = true;
+            }
+            self.toast(
+                "Stopping after the current file or API request...",
+                ToastKind::Warning,
+            );
         }
     }
 
@@ -720,8 +976,17 @@ impl App {
             return;
         };
 
+        let progress_color = if job.stopping {
+            Color32::from_rgb(220, 160, 70)
+        } else {
+            Color32::from_rgb(70, 170, 120)
+        };
         ui.horizontal(|ui| {
-            ui.label(format!("Downloading {}...", job.label));
+            ui.label(if job.stopping {
+                format!("Stopping {}...", job.label)
+            } else {
+                format!("Downloading {}...", job.label)
+            });
         });
 
         match job.total {
@@ -730,11 +995,16 @@ impl App {
                 ui.add(
                     egui::ProgressBar::new(fraction)
                         .text(format!("{}/{}", job.completed, total))
+                        .fill(progress_color)
                         .animate(true),
                 );
             }
             _ => {
-                ui.add(egui::ProgressBar::new(0.0).animate(true));
+                ui.add(
+                    egui::ProgressBar::new(0.0)
+                        .fill(progress_color)
+                        .animate(true),
+                );
             }
         }
     }
@@ -742,7 +1012,11 @@ impl App {
 
 fn tags_edit(ui: &mut egui::Ui, tags: &mut String) {
     ui.label("Tags");
-    ui.add(egui::TextEdit::multiline(tags).desired_rows(2).char_limit(250));
+    ui.add(
+        egui::TextEdit::multiline(tags)
+            .desired_rows(2)
+            .char_limit(250),
+    );
 }
 
 fn archive_format_label(fmt: ArchiveFormat) -> &'static str {
@@ -755,7 +1029,9 @@ fn archive_format_label(fmt: ArchiveFormat) -> &'static str {
 
 fn open_dl_dir(dir: &str) {
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer").arg(dir.replace('/', "\\")).spawn();
+    let _ = std::process::Command::new("explorer")
+        .arg(dir.replace('/', "\\"))
+        .spawn();
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     #[cfg(target_os = "macos")]

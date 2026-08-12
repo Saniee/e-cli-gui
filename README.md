@@ -12,6 +12,12 @@ What it can do:
 - [x] Downloading a Pool, with files numbered to preserve reading order
 - [x] Packaging a downloaded Pool into a `.zip`/`.7z`/`.cbz` archive (requires `7z` on `PATH`)
 - [x] Login with your API Key to download every post!
+- [x] Resumable downloads with configurable retries and cooperative cancellation
+- [x] Dry-run planning without writing files or local state
+- [x] JSON metadata manifests and persistent failed-download manifests
+- [x] Persistent MD5 duplicate detection
+- [x] TOML tag preset loading and saving
+- [x] Retry failed downloads from the GUI
 
 # Usage
 ## Just run the .exe or the linux binary (without any extension).
