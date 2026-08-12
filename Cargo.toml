@@ -1,6 +1,6 @@
 [package]
 name = "e-cli-gui"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 
 [dependencies]
@@ -8,6 +8,6 @@ eframe = "0.33"
 egui = "0.33"
 egui-toast = "=0.19.1"
 trash = "5"
-e-cli = { git = "https://github.com/Saniee/e-cli.git", tag = "v0.6.3", default-features = false }
+e-cli = { git = "https://github.com/Saniee/e-cli.git", tag = "v0.6.4", default-features = false }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 rayon = "1.11"

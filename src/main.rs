@@ -76,6 +76,8 @@ struct ActiveJob {
     completed: u64,
     total: Option<u64>,
     stopping: bool,
+    dry_run: bool,
+    status: String,
 }
 
 struct ActiveZip {
@@ -120,6 +122,7 @@ struct App {
     version_check_rx: Option<Receiver<Result<Option<String>, String>>>,
 
     pending_toasts: Vec<(String, ToastKind)>,
+    last_summary: Option<String>,
 }
 
 impl Default for App {
@@ -156,6 +159,7 @@ impl Default for App {
             zip_job: None,
             version_check_rx: None,
             pending_toasts: Vec::new(),
+            last_summary: None,
         }
     }
 }
@@ -205,7 +209,10 @@ impl App {
             completed: 0,
             total: None,
             stopping: false,
+            dry_run: self.dry_run,
+            status: "Starting...".to_owned(),
         });
+        self.last_summary = None;
         self.toast(format!("Starting {label} download..."), ToastKind::Info);
     }
 
@@ -536,19 +543,33 @@ impl App {
     fn poll_job(&mut self, ctx: &egui::Context) {
         let Some(job) = &mut self.job else { return };
         let mut finished_msg: Option<(String, ToastKind)> = None;
+        let mut job_finished = false;
 
         while let Ok(progress) = job.rx.try_recv() {
             match progress {
                 Progress::Total(total) => job.total = Some(total),
+                Progress::Status(status) => job.status = status,
                 Progress::Tick => job.completed += 1,
                 Progress::Finished(stats) => {
-                    finished_msg = Some((
+                    job_finished = true;
+                    let message = if job.dry_run {
+                        format!(
+                            "Dry run: {} posts planned, estimated {}, destination '{}'.",
+                            stats.total,
+                            format_bytes(stats.downloaded_amount),
+                            self.dl_dir,
+                        )
+                    } else {
                         format!(
                             "Finished! {} downloaded, {} skipped, {} failed (of {}).",
                             stats.completed, stats.skipped, stats.failed, stats.total
-                        ),
-                        ToastKind::Success,
-                    ));
+                        )
+                    };
+                    if job.dry_run {
+                        self.last_summary = Some(message);
+                    } else {
+                        finished_msg = Some((message, ToastKind::Success));
+                    }
                 }
                 Progress::Cancelled => {
                     finished_msg = Some(("Download cancelled.".to_owned(), ToastKind::Info));
@@ -560,8 +581,10 @@ impl App {
             ctx.request_repaint();
         }
 
-        if let Some((text, kind)) = finished_msg {
-            self.toast(text, kind);
+        if job_finished || finished_msg.is_some() {
+            if let Some((text, kind)) = finished_msg {
+                self.toast(text, kind);
+            }
             let open_folder = self.open_folder_after;
             self.job = None;
             if open_folder {
@@ -636,9 +659,12 @@ impl eframe::App for App {
 
 impl App {
     fn config_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Global settings");
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Connection settings")
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.heading("Global settings");
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new("Connection settings")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -688,17 +714,32 @@ impl App {
                     "Dry run (no files or local state written)",
                 );
                 ui.horizontal(|ui| {
-                    ui.label("Manifest");
-                    ui.text_edit_singleline(&mut self.manifest_path);
+                    ui.label("Manifest path (.json)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.manifest_path)
+                            .hint_text("e.g. ./run.json"),
+                    );
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Duplicate index");
-                    ui.text_edit_singleline(&mut self.duplicate_index);
+                    ui.label("Duplicate index (.json)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.duplicate_index)
+                            .hint_text("blank = download folder default"),
+                    );
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Failure manifest");
-                    ui.text_edit_singleline(&mut self.failure_manifest);
+                    ui.label("Failure manifest (.json)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.failure_manifest)
+                            .hint_text("blank = download folder default"),
+                    );
                 });
+                ui.label(
+                    RichText::new(
+                        "The download manifest is written when the job finishes. Leave it blank to disable it.",
+                    )
+                    .weak(),
+                );
                 ui.checkbox(
                     &mut self.open_folder_after,
                     format!("Open {} when finished", self.dl_dir),
@@ -761,22 +802,23 @@ impl App {
                             ui.selectable_value(&mut self.preset_name, name.clone(), name);
                         }
                     });
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open config").clicked() {
+                        self.open_config();
+                    }
+                    ui.label(
+                        RichText::new(
+                            econfig::path()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| "config location unavailable".to_owned()),
+                        )
+                        .weak(),
+                    );
+                });
+                ui.add_space(8.0);
             });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button("Open config").clicked() {
-                self.open_config();
-            }
-            ui.label(
-                RichText::new(
-                    econfig::path()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| "config location unavailable".to_owned()),
-                )
-                .weak(),
-            );
-        });
-        ui.add_space(8.0);
     }
 
     fn favourites_ui(&mut self, ui: &mut egui::Ui) {
@@ -972,7 +1014,11 @@ impl App {
 
     fn progress_ui(&mut self, ui: &mut egui::Ui) {
         let Some(job) = &self.job else {
-            ui.label(RichText::new("Idle").weak());
+            if let Some(summary) = &self.last_summary {
+                ui.label(RichText::new(summary).strong());
+            } else {
+                ui.label(RichText::new("Idle").weak());
+            }
             return;
         };
 
@@ -985,7 +1031,7 @@ impl App {
             ui.label(if job.stopping {
                 format!("Stopping {}...", job.label)
             } else {
-                format!("Downloading {}...", job.label)
+                format!("{}: {}", job.label, job.status)
             });
         });
 
@@ -1017,6 +1063,17 @@ fn tags_edit(ui: &mut egui::Ui, tags: &mut String) {
             .desired_rows(2)
             .char_limit(250),
     );
+}
+
+fn format_bytes(bytes: f64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes >= MB {
+        format!("{:.2} MB", bytes / MB)
+    } else if bytes >= 1024.0 {
+        format!("{:.2} KB", bytes / 1024.0)
+    } else {
+        format!("{bytes:.0} bytes")
+    }
 }
 
 fn archive_format_label(fmt: ArchiveFormat) -> &'static str {

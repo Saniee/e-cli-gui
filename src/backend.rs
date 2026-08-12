@@ -42,6 +42,8 @@ pub enum JobKind {
 pub enum Progress {
     /// Total post count is now known; UI can switch from indeterminate to a counter.
     Total(u64),
+    /// Status while API data is being fetched and the total is not known yet.
+    Status(String),
     /// One more post has finished (successfully or not).
     Tick,
     Finished(DownloadStatistics),
@@ -81,7 +83,14 @@ pub fn spawn_download(
                 load_duplicate_index(&settings.duplicate_index, &output_dir, &tx)
             },
             cancel: Some(cancel.clone()),
-            progress: None,
+            progress: Some(Arc::new({
+                let tx = tx.clone();
+                move |progress| {
+                    if let Some(phase) = progress.phase {
+                        let _ = tx.send(Progress::Status(phase));
+                    }
+                }
+            })),
         };
         let login = Login {
             username: settings.username.clone(),
