@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use backend::{DownloadSettings, JobKind, Progress, ZipEvent};
 use e_cli::cli::ArchiveFormat;
@@ -78,6 +79,8 @@ struct ActiveJob {
     stopping: bool,
     dry_run: bool,
     status: String,
+    downloaded_bytes: f64,
+    started_at: Instant,
 }
 
 struct ActiveZip {
@@ -211,6 +214,8 @@ impl App {
             stopping: false,
             dry_run: self.dry_run,
             status: "Starting...".to_owned(),
+            downloaded_bytes: 0.0,
+            started_at: Instant::now(),
         });
         self.last_summary = None;
         self.toast(format!("Starting {label} download..."), ToastKind::Info);
@@ -552,7 +557,10 @@ impl App {
                     job.status = "Downloading posts...".to_owned();
                 }
                 Progress::Status(status) => job.status = status,
-                Progress::Tick => job.completed += 1,
+                Progress::Tick(bytes) => {
+                    job.completed += 1;
+                    job.downloaded_bytes += bytes;
+                }
                 Progress::Finished(stats) => {
                     job_finished = true;
                     let message = if job.dry_run {
@@ -1030,12 +1038,35 @@ impl App {
         } else {
             Color32::from_rgb(70, 170, 120)
         };
+        let elapsed = job.started_at.elapsed().as_secs_f64();
+        let posts_per_second = if elapsed > 0.0 {
+            job.completed as f64 / elapsed
+        } else {
+            0.0
+        };
+        let megabytes_per_second = if elapsed > 0.0 {
+            job.downloaded_bytes / elapsed / 1024.0 / 1024.0
+        } else {
+            0.0
+        };
+        let eta = match (job.total, posts_per_second) {
+            (Some(total), rate) if rate > 0.0 && total > job.completed => format_duration(
+                Duration::from_secs_f64((total - job.completed) as f64 / rate),
+            ),
+            _ => "--".to_owned(),
+        };
         ui.horizontal(|ui| {
             ui.label(if job.stopping {
                 format!("Stopping {}...", job.label)
             } else {
                 format!("{}: {}", job.label, job.status)
             });
+            ui.label(
+                RichText::new(format!(
+                    "{megabytes_per_second:.2} MB/s | {posts_per_second:.2} posts/s | ETA {eta}"
+                ))
+                .weak(),
+            );
         });
 
         match job.total {
@@ -1076,6 +1107,17 @@ fn format_bytes(bytes: f64) -> String {
         format!("{:.2} KB", bytes / 1024.0)
     } else {
         format!("{bytes:.0} bytes")
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 3600 {
+        format!("{}h {:02}m", seconds / 3600, (seconds / 60) % 60)
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}s", seconds)
     }
 }
 

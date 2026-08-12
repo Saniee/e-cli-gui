@@ -45,7 +45,7 @@ pub enum Progress {
     /// Status while API data is being fetched and the total is not known yet.
     Status(String),
     /// One more post has finished (successfully or not).
-    Tick,
+    Tick(f64),
     Finished(DownloadStatistics),
     Cancelled,
     Error(String),
@@ -305,7 +305,7 @@ fn run_indexed_download(
                             cancel: Some(cancel.clone()),
                         },
                     );
-                    let _ = progress_tx.send(Progress::Tick);
+                    let _ = progress_tx.send(Progress::Tick(result.amount));
                     let _ = chunk_tx.send(result);
                 },
             );
@@ -380,7 +380,7 @@ fn download_posts_parallel(
                         cancel: Some(cancel.clone()),
                     },
                 );
-                let _ = progress_tx.send(Progress::Tick);
+                let _ = progress_tx.send(Progress::Tick(result.amount));
                 let _ = result_tx.send(result);
             },
         );
