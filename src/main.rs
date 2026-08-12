@@ -547,7 +547,10 @@ impl App {
 
         while let Ok(progress) = job.rx.try_recv() {
             match progress {
-                Progress::Total(total) => job.total = Some(total),
+                Progress::Total(total) => {
+                    job.total = Some(total);
+                    job.status = "Downloading posts...".to_owned();
+                }
                 Progress::Status(status) => job.status = status,
                 Progress::Tick => job.completed += 1,
                 Progress::Finished(stats) => {
